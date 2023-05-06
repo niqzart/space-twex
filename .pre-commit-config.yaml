@@ -21,16 +21,19 @@ repos:
     rev: v1.6.0
     hooks:
       - id: autoflake
+        types_or: [python, pyi]
 
   - repo: https://github.com/pycqa/isort
     rev: 5.12.0
     hooks:
       - id: isort
+        types_or: [python, pyi]
 
   - repo: https://github.com/psf/black
     rev: 23.1.0
     hooks:
       - id: black
+        types_or: [python, pyi]
 
   - repo: local
     hooks:
@@ -55,7 +58,13 @@ repos:
     rev: 1.4.1
     hooks:
       - id: poetry-check
-        files: ^(pyproject.toml|poetry.lock)$
+        files: pyproject.toml|poetry.lock
+        args:
+          - "-C"
+          - "./backend"
       - id: poetry-lock
-        files: ^(pyproject.toml|poetry.lock)$
-        args: ["--no-update"]
+        files: pyproject.toml|poetry.lock
+        args:
+          - "--no-update"
+          - "-C"
+          - "./backend"
