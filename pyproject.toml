@@ -1,0 +1,64 @@
+[tool.poetry]
+name = "space-twex"
+version = "0.1.0"
+description = "File transfer server with no filestorage requirements"
+authors = ["niqzart"]
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.2.2"
+flake8 = "4.0.1"
+black = "^23.1.0"
+pre-commit = "^3.2.1"
+mypy = "^1.1.1"
+flake8-pie = "0.16.0"
+dlint = "0.14.0"
+flake8-coding = "1.3.2"
+flake8-secure-coding-standard = "1.4.0"
+flake8-unused-arguments = "0.0.13"
+flake8-pytest-style = "1.7.2"
+flake8-useless-assert = "0.4.4"
+flake8-simplify = "0.19.3"
+flake8-future-import = "0.4.7"
+flake8-functions-names = "0.4.0"
+flake8-variables-names = "0.0.5"
+flake8-comments = "0.1.2"
+flake8-annotations = "2.9.1"
+flake8-new-union-types = "0.4.1"
+flake8-pep585 = "0.1.7"
+flake8-type-checking = "2.3.1"
+flake8-print = "5.0.0"
+flake8-use-fstring = "1.4"
+flake8-use-pathlib = "0.3.0"
+flake8-pyproject = "0.9.1"
+flake8-test-name = "^0.1.5"
+wemake-python-styleguide = "^0.17.0"
+
+[tool.flake8]
+ignore = ["D", "I", "FI", "TC", "Q", "PIE786", "PIE798", "PIE803", "ANN101", "ANN401", "U101", "C101", "C812", "FS003", "FNE008", "NU002", "WPS110", "WPS115", "WPS202", "WPS217", "WPS221", "WPS226", "WPS237", "WPS305", "WPS306", "WPS348", "WPS354", "WPS400", "WPS420", "WPS430", "WPS501", "WPS600", "WPS602", "WPS605", "WPS100"]
+max-line-length = 88
+
+test-func-name-validator-regex = "test_.*"
+
+suppress-dummy-args = true
+
+literal-inline-quotes = "double"
+literal-multiline-quotes = "double"
+literal-docstring-quotes = "double"
+literal-include-name = true
+
+[tool.isort]
+profile = "black"
+py_version = 311
+combine_as_imports = true
+known_first_party = ["app", "tests"]
+no_lines_before = "LOCALFOLDER"
+reverse_relative = true
+line_length = 88
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
