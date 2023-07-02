@@ -39,6 +39,8 @@ flake8-use-pathlib = "0.3.0"
 flake8-pyproject = "0.9.1"
 flake8-test-name = "^0.1.5"
 wemake-python-styleguide = "^0.17.0"
+anyio = "^3.7.0"
+faker = "^18.11.2"
 
 [tool.flake8]
 ignore = ["D", "I", "FI", "TC", "Q", "PIE786", "PIE798", "PIE803", "ANN101", "ANN401", "U101", "C101", "C812", "FS003", "FNE008", "NU002", "WPS110", "WPS115", "WPS202", "WPS217", "WPS221", "WPS226", "WPS237", "WPS305", "WPS306", "WPS348", "WPS354", "WPS400", "WPS420", "WPS430", "WPS501", "WPS600", "WPS602", "WPS605", "WPS100"]
