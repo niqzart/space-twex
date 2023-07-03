@@ -84,4 +84,24 @@ async def received(sid: str, data: Any) -> dict[str, Any]:
     return Ack(code=200).model_dump()
 
 
+class FinishArgs(FileIdArgs):
+    pass
+
+
+@sio.on("finish")  # type: ignore
+async def finish(sid: str, data: Any) -> dict[str, Any]:
+    try:
+        args = FinishArgs.model_validate(data)
+    except ValidationError as e:
+        return Ack(code=422, data=str(e)).model_dump()
+
+    await sio.emit(
+        event="finish",
+        data={**args.model_dump()},
+        room=f"{args.file_id}-subscribers",
+        skip_sid=sid,
+    )
+    return Ack(code=200).model_dump()
+
+
 app = ASGIApp(socketio_server=sio)

@@ -39,5 +39,12 @@ async def test_basic(
     assert event_received.get("chunk_id") == chunk_id
     assert event_received.get("file_id") == file_id
 
+    ack_finish = await sender.emit("finish", {"file_id": file_id})
+    assert ack_finish.get("code") == 200
+
+    event_finish = receiver.event_pop("finish")
+    assert isinstance(event_finish, dict)
+    assert event_finish.get("file_id") == file_id
+
     assert sender.event_count() == 0
     assert receiver.event_count() == 0
