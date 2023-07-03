@@ -29,15 +29,15 @@ async def test_basic(
     assert event_send.get("chunk_id") == chunk_id
     assert event_send.get("file_id") == file_id
 
-    ack_received = await receiver.emit(
-        "received", {"file_id": file_id, "chunk_id": chunk_id}
+    ack_confirm = await receiver.emit(
+        "confirm", {"file_id": file_id, "chunk_id": chunk_id}
     )
-    assert ack_received.get("code") == 200
+    assert ack_confirm.get("code") == 200
 
-    event_received = sender.event_pop("received")
-    assert isinstance(event_received, dict)
-    assert event_received.get("chunk_id") == chunk_id
-    assert event_received.get("file_id") == file_id
+    ack_confirm = sender.event_pop("confirm")
+    assert isinstance(ack_confirm, dict)
+    assert ack_confirm.get("chunk_id") == chunk_id
+    assert ack_confirm.get("file_id") == file_id
 
     ack_finish = await sender.emit("finish", {"file_id": file_id})
     assert ack_finish.get("code") == 200

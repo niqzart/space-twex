@@ -64,19 +64,19 @@ async def send(sid: str, data: Any) -> dict[str, Any]:
     return Ack(code=200, data={"chunk_id": chunk_id}).model_dump()
 
 
-class ReceiveArgs(FileIdArgs):
+class ConfirmArgs(FileIdArgs):
     chunk_id: str
 
 
-@sio.on("received")  # type: ignore
-async def received(sid: str, data: Any) -> dict[str, Any]:
+@sio.on("confirm")  # type: ignore
+async def confirm(sid: str, data: Any) -> dict[str, Any]:
     try:
-        args = ReceiveArgs.model_validate(data)
+        args = ConfirmArgs.model_validate(data)
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
 
     await sio.emit(
-        event="received",
+        event="confirm",
         data={**args.model_dump()},
         room=f"{args.file_id}-publishers",
         skip_sid=sid,
