@@ -19,12 +19,18 @@ async def hello(sid: str, *_: Any) -> None:
 
 
 @sio.on("create")  # type: ignore
-async def create(_: str, __: bytes) -> dict[str, Any]:
-    return Ack(code=201, data=uuid4().hex).model_dump()
+async def create(sid: str, _: bytes) -> dict[str, Any]:
+    file_id: str = uuid4().hex
+    sio.enter_room(sid=sid, room=f"{file_id}-publishers")
+    return Ack(code=201, data={"file_id": file_id}).model_dump()
 
 
-class SubscribeArgs(BaseModel):
+class FileIdArgs(BaseModel):
     file_id: str
+
+
+class SubscribeArgs(FileIdArgs):
+    pass
 
 
 @sio.on("subscribe")  # type: ignore
@@ -33,12 +39,11 @@ async def subscribe(sid: str, data: Any) -> dict[str, Any]:
         args = SubscribeArgs.model_validate(data)
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
-    sio.enter_room(sid=sid, room=args.file_id)
+    sio.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
     return Ack(code=200).model_dump()
 
 
-class SendArgs(BaseModel):
-    file_id: str
+class SendArgs(FileIdArgs):
     chunk: bytes
 
 
@@ -48,8 +53,34 @@ async def send(sid: str, data: Any) -> dict[str, Any]:
         args = SendArgs.model_validate(data)
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
-    logging.warning(f"{args.file_id=} {args.chunk=}")
-    await sio.emit("send", args.chunk, room=args.file_id, skip_sid=sid)
+
+    chunk_id: str = uuid4().hex
+    await sio.emit(
+        event="send",
+        data={"chunk_id": chunk_id, **args.model_dump()},
+        room=f"{args.file_id}-subscribers",
+        skip_sid=sid,
+    )
+    return Ack(code=200, data={"chunk_id": chunk_id}).model_dump()
+
+
+class ReceiveArgs(FileIdArgs):
+    chunk_id: str
+
+
+@sio.on("received")  # type: ignore
+async def received(sid: str, data: Any) -> dict[str, Any]:
+    try:
+        args = ReceiveArgs.model_validate(data)
+    except ValidationError as e:
+        return Ack(code=422, data=str(e)).model_dump()
+
+    await sio.emit(
+        event="received",
+        data={**args.model_dump()},
+        room=f"{args.file_id}-publishers",
+        skip_sid=sid,
+    )
     return Ack(code=200).model_dump()
 
 
