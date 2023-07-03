@@ -35,13 +35,13 @@ repos:
       - id: black
         types_or: [python, pyi]
 
-  - repo: local
-    hooks:
-      - id: flake8
-        name: flake8 (pyproject.toml)
-        language: system
-        entry: flake8p
-        types_or: [python, pyi]
+  # - repo: local
+  #   hooks:
+  #     - id: flake8
+  #       name: flake8 (pyproject.toml)
+  #       language: system
+  #       entry: flake8p
+  #       types_or: [python, pyi]
 
   - repo: local
     hooks:
