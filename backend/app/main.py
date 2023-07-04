@@ -58,6 +58,12 @@ async def subscribe(sid: str, data: Any) -> dict[str, Any]:
         return Ack(code=404).model_dump()
 
     sio.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
+    await sio.emit(
+        event="subscribe",
+        data={**args.model_dump()},
+        room=f"{args.file_id}-publishers",
+        skip_sid=sid,
+    )
     return Ack(code=200, data=twex).model_dump()
 
 

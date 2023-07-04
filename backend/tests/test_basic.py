@@ -21,6 +21,10 @@ async def test_basic(
     assert isinstance(ack_subscribe_data := ack_subscribe.get("data", None), dict)
     assert ack_subscribe_data.get("file_name") == file_name
 
+    event_subscribe = sender.event_pop("subscribe")
+    assert isinstance(event_subscribe, dict)
+    assert event_subscribe.get("file_id") == file_id
+
     chunk: bytes = faker.binary(length=24)
     ack_send = await sender.emit("send", {"file_id": file_id, "chunk": chunk})
     assert ack_send.get("code") == 200
@@ -38,10 +42,10 @@ async def test_basic(
     )
     assert ack_confirm.get("code") == 200
 
-    ack_confirm = sender.event_pop("confirm")
-    assert isinstance(ack_confirm, dict)
-    assert ack_confirm.get("chunk_id") == chunk_id
-    assert ack_confirm.get("file_id") == file_id
+    event_confirm = sender.event_pop("confirm")
+    assert isinstance(event_confirm, dict)
+    assert event_confirm.get("chunk_id") == chunk_id
+    assert event_confirm.get("file_id") == file_id
 
     ack_finish = await sender.emit("finish", {"file_id": file_id})
     assert ack_finish.get("code") == 200
