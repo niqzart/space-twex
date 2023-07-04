@@ -1,4 +1,5 @@
 import logging
+from enum import Enum
 from typing import Any
 from uuid import uuid4
 
@@ -8,6 +9,14 @@ from socketio import ASGIApp, AsyncServer  # type: ignore
 
 db: Redis = Redis(decode_responses=True)  # type: ignore[type-arg]
 sio = AsyncServer(async_mode="asgi")
+
+
+class TwexStatus(str, Enum):
+    OPEN = "open"
+    FULL = "full"
+    SENT = "sent"
+    CONFIRMED = "confirmed"
+    FINISHED = "finished"
 
 
 class Ack(BaseModel):
@@ -32,7 +41,13 @@ async def create(sid: str, data: Any) -> dict[str, Any]:
         return Ack(code=422, data=str(e)).model_dump()
 
     file_id: str = uuid4().hex
-    await db.hset(name=file_id, mapping={"file_name": args.file_name})
+    await db.hset(
+        name=file_id,
+        mapping={
+            "file_name": args.file_name,
+            "status": TwexStatus.OPEN.value,
+        },
+    )
 
     sio.enter_room(sid=sid, room=f"{file_id}-publishers")
     return Ack(code=201, data={"file_id": file_id}).model_dump()
@@ -56,6 +71,10 @@ async def subscribe(sid: str, data: Any) -> dict[str, Any]:
     twex = await db.hgetall(name=args.file_id)
     if twex is None:
         return Ack(code=404).model_dump()
+    if twex["status"] != TwexStatus.OPEN:
+        return Ack(code=400, data=f"Wrong status: {twex['status']}").model_dump()
+    await db.hset(args.file_id, "status", TwexStatus.FULL.value)
+    # TODO more control over FULL for non-dialog twexes
 
     sio.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
     await sio.emit(
@@ -78,6 +97,13 @@ async def send(sid: str, data: Any) -> dict[str, Any]:
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
 
+    twex_status = await db.hget(name=args.file_id, key="status")
+    if twex_status is None:
+        return Ack(code=404).model_dump()
+    if twex_status not in {TwexStatus.FULL, TwexStatus.CONFIRMED}:
+        return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
+    await db.hset(args.file_id, "status", TwexStatus.SENT.value)
+
     chunk_id: str = uuid4().hex
     await sio.emit(
         event="send",
@@ -99,6 +125,13 @@ async def confirm(sid: str, data: Any) -> dict[str, Any]:
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
 
+    twex_status = await db.hget(name=args.file_id, key="status")
+    if twex_status is None:
+        return Ack(code=404).model_dump()
+    if twex_status != TwexStatus.SENT:
+        return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
+    await db.hset(args.file_id, "status", TwexStatus.CONFIRMED.value)
+
     await sio.emit(
         event="confirm",
         data={**args.model_dump()},
@@ -118,6 +151,13 @@ async def finish(sid: str, data: Any) -> dict[str, Any]:
         args = FinishArgs.model_validate(data)
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
+
+    twex_status = await db.hget(name=args.file_id, key="status")
+    if twex_status is None:
+        return Ack(code=404).model_dump()
+    if twex_status != TwexStatus.CONFIRMED:
+        return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
+    await db.delete(args.file_id)
 
     await sio.emit(
         event="finish",
