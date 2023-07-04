@@ -3,8 +3,10 @@ from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ValidationError
+from redis.asyncio import Redis
 from socketio import ASGIApp, AsyncServer  # type: ignore
 
+db: Redis = Redis(decode_responses=True)  # type: ignore[type-arg]
 sio = AsyncServer(async_mode="asgi")
 
 
@@ -18,9 +20,20 @@ async def hello(sid: str, *_: Any) -> None:
     logging.warning(f"Connected to {sid}")
 
 
+class CreateArgs(BaseModel):
+    file_name: str
+
+
 @sio.on("create")  # type: ignore
-async def create(sid: str, _: bytes) -> dict[str, Any]:
+async def create(sid: str, data: Any) -> dict[str, Any]:
+    try:
+        args = CreateArgs.model_validate(data)
+    except ValidationError as e:
+        return Ack(code=422, data=str(e)).model_dump()
+
     file_id: str = uuid4().hex
+    await db.hset(name=file_id, mapping={"file_name": args.file_name})
+
     sio.enter_room(sid=sid, room=f"{file_id}-publishers")
     return Ack(code=201, data={"file_id": file_id}).model_dump()
 
@@ -39,8 +52,13 @@ async def subscribe(sid: str, data: Any) -> dict[str, Any]:
         args = SubscribeArgs.model_validate(data)
     except ValidationError as e:
         return Ack(code=422, data=str(e)).model_dump()
+
+    twex = await db.hgetall(name=args.file_id)
+    if twex is None:
+        return Ack(code=404).model_dump()
+
     sio.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
-    return Ack(code=200).model_dump()
+    return Ack(code=200, data=twex).model_dump()
 
 
 class SendArgs(FileIdArgs):

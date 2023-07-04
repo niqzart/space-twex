@@ -10,12 +10,16 @@ async def test_basic(
     receiver: AsyncSIOTestClient,
     faker: Faker,
 ) -> None:
-    ack_create = await sender.emit("create", None)
+    file_name: str = faker.file_name()
+
+    ack_create = await sender.emit("create", {"file_name": file_name})
     assert ack_create.get("code") == 201
     assert (file_id := ack_create.get("data", {}).get("file_id")) is not None
 
     ack_subscribe = await receiver.emit("subscribe", {"file_id": file_id})
     assert ack_subscribe.get("code") == 200
+    assert isinstance(ack_subscribe_data := ack_subscribe.get("data", None), dict)
+    assert ack_subscribe_data.get("file_name") == file_name
 
     chunk: bytes = faker.binary(length=24)
     ack_send = await sender.emit("send", {"file_id": file_id, "chunk": chunk})
