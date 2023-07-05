@@ -10,15 +10,15 @@ from app.twex.twex_db import Twex, TwexStatus
 
 
 class MainNamespace(AsyncNamespace):  # type: ignore
-    async def trigger_event(self, event: str, *args: Any) -> dict[str, Any]:
-        result: Ack
+    async def trigger_event(self, event: str, *args: Any) -> dict[str, Any] | None:
+        result: Ack | None
         try:
             result = await super().trigger_event(event, *args)
         except ValidationError as e:
             result = Ack(code=422, data=str(e))
         except AbortException as e:
             result = e.ack
-        return result.model_dump()
+        return None if result is None else result.model_dump()
 
     async def on_connect(self, sid: str, *_: Any) -> None:
         logging.warning(f"Connected to {sid}")
