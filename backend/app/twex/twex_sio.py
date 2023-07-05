@@ -11,12 +11,14 @@ from app.twex.twex_db import Twex, TwexStatus
 
 class MainNamespace(AsyncNamespace):  # type: ignore
     async def trigger_event(self, event: str, *args: Any) -> dict[str, Any]:
+        result: Ack
         try:
-            return await super().trigger_event(event, *args)  # type: ignore
+            result = await super().trigger_event(event, *args)
         except ValidationError as e:
-            raise AbortException(Ack(code=422, data=str(e)))
+            result = Ack(code=422, data=str(e))
         except AbortException as e:
-            return e.ack.model_dump()
+            result = e.ack
+        return result.model_dump()
 
     async def on_connect(self, sid: str, *_: Any) -> None:
         logging.warning(f"Connected to {sid}")
@@ -24,14 +26,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class CreateArgs(BaseModel):
         file_name: str
 
-    async def on_create(self, sid: str, data: Any) -> dict[str, Any]:
+    async def on_create(self, sid: str, data: Any) -> Ack:
         args = self.CreateArgs.model_validate(data)
 
         twex = Twex(file_name=args.file_name)
         await twex.save()
 
         self.enter_room(sid=sid, room=f"{twex.file_id}-publishers")
-        return Ack(code=201, data={"file_id": twex.file_id}).model_dump()
+        return Ack(code=201, data={"file_id": twex.file_id})
 
     class FileIdArgs(BaseModel):
         file_id: str
@@ -39,7 +41,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class SubscribeArgs(FileIdArgs):
         pass
 
-    async def on_subscribe(self, sid: str, data: Any) -> dict[str, Any]:
+    async def on_subscribe(self, sid: str, data: Any) -> Ack:
         args = self.SubscribeArgs.model_validate(data)
 
         twex: Twex = await Twex.find_with_status(
@@ -55,12 +57,12 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             room=f"{args.file_id}-publishers",
             skip_sid=sid,
         )
-        return Ack(code=200, data=twex).model_dump()
+        return Ack(code=200, data=twex)
 
     class SendArgs(FileIdArgs):
         chunk: bytes
 
-    async def on_send(self, sid: str, data: Any) -> dict[str, Any]:
+    async def on_send(self, sid: str, data: Any) -> Ack:
         args = self.SendArgs.model_validate(data)
 
         await Twex.transfer_status(
@@ -76,12 +78,12 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             room=f"{args.file_id}-subscribers",
             skip_sid=sid,
         )
-        return Ack(code=200, data={"chunk_id": chunk_id}).model_dump()
+        return Ack(code=200, data={"chunk_id": chunk_id})
 
     class ConfirmArgs(FileIdArgs):
         chunk_id: str
 
-    async def on_confirm(self, sid: str, data: Any) -> dict[str, Any]:
+    async def on_confirm(self, sid: str, data: Any) -> Ack:
         args = self.ConfirmArgs.model_validate(data)
 
         await Twex.transfer_status(
@@ -96,12 +98,12 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             room=f"{args.file_id}-publishers",
             skip_sid=sid,
         )
-        return Ack(code=200).model_dump()
+        return Ack(code=200)
 
     class FinishArgs(FileIdArgs):
         pass
 
-    async def on_finish(self, sid: str, data: Any) -> dict[str, Any]:
+    async def on_finish(self, sid: str, data: Any) -> Ack:
         args = self.FinishArgs.model_validate(data)
 
         await Twex.transfer_status(
@@ -116,4 +118,4 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             room=f"{args.file_id}-subscribers",
             skip_sid=sid,
         )
-        return Ack(code=200).model_dump()
+        return Ack(code=200)
