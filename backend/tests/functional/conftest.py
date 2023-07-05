@@ -1,4 +1,5 @@
 import pytest
+from faker import Faker
 
 from app.main import sio
 from app.twex.twex_db import Twex
@@ -19,3 +20,17 @@ async def roomed_sender(
 ) -> AsyncSIOTestClient:
     sio.enter_room(sender.sid, f"{source_twex.file_id}-publishers")
     return sender
+
+
+@pytest.fixture()
+async def roomed_receiver(
+    receiver: AsyncSIOTestClient,
+    source_twex: Twex,
+) -> AsyncSIOTestClient:
+    sio.enter_room(receiver.sid, f"{source_twex.file_id}-subscribers")
+    return receiver
+
+
+@pytest.fixture()
+async def chunk(faker: Faker) -> bytes:
+    return faker.binary(length=24)  # type: ignore
