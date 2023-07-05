@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 
 import pytest
+from faker import Faker
 
 from app.main import sio as sio_server
 from tests.testing import AsyncSIOTestClient, AsyncSIOTestServer
@@ -27,3 +28,8 @@ async def sender(server: AsyncSIOTestServer) -> AsyncIterator[AsyncSIOTestClient
 async def receiver(server: AsyncSIOTestServer) -> AsyncIterator[AsyncSIOTestClient]:
     async with server.client() as client:
         yield client
+
+
+@pytest.fixture()
+def file_name(faker: Faker) -> str:
+    return faker.file_name()  # type: ignore

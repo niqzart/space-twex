@@ -8,16 +8,17 @@ from tests.testing import AsyncSIOTestClient
 async def test_main_flow(
     sender: AsyncSIOTestClient,
     receiver: AsyncSIOTestClient,
+    file_name: str,
     faker: Faker,
 ) -> None:
-    file_name: str = faker.file_name()
     chunk_1: bytes = faker.binary(length=24)
     chunk_2: bytes = faker.binary(length=24)
 
     # producer creates the file
     ack_create = await sender.emit("create", {"file_name": file_name})
     assert ack_create.get("code") == 201
-    assert (file_id := ack_create.get("data", {}).get("file_id")) is not None
+    assert isinstance(ack_create_data := ack_create.get("data"), dict)
+    assert isinstance(file_id := ack_create_data.get("file_id"), str)
 
     # producer fails to send to no clients
     ack_send_early = await sender.emit("send", {"file_id": file_id, "chunk": chunk_1})
