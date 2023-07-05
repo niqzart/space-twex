@@ -1,14 +1,24 @@
 import logging
 from enum import Enum
-from typing import Any
+from typing import Any, Self
 from uuid import uuid4
 
-from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from redis.asyncio import Redis
 from socketio import ASGIApp, AsyncNamespace, AsyncServer  # type: ignore
 
 db: Redis = Redis(decode_responses=True)  # type: ignore[type-arg]
 sio = AsyncServer(async_mode="asgi")
+
+
+class Ack(BaseModel):
+    code: int
+    data: Any | None = None
+
+
+class AbortException(Exception):
+    def __init__(self, ack: Ack) -> None:
+        self.ack: Ack = ack
 
 
 class TwexStatus(str, Enum):
@@ -19,9 +29,50 @@ class TwexStatus(str, Enum):
     FINISHED = "finished"
 
 
-class Ack(BaseModel):
-    code: int
-    data: Any | None = None
+class Twex(BaseModel):
+    file_id: str = Field(default_factory=lambda: uuid4().hex)
+    file_name: str
+    status: TwexStatus = TwexStatus.OPEN
+
+    @classmethod
+    async def find_one(cls, file_id: str) -> Self:
+        data = await db.hgetall(name=file_id)
+        if data is None:
+            raise AbortException(Ack(code=404))
+        return cls(**data)
+
+    @classmethod
+    async def find_with_status(cls, file_id: str, statuses: set[TwexStatus]) -> Self:
+        twex: Self = await cls.find_one(file_id)
+        if twex.status not in statuses:
+            raise AbortException(Ack(code=400, data=f"Wrong status: {twex.status}"))
+        return twex
+
+    async def update_status(self, new_status: TwexStatus) -> None:
+        await db.hset(self.file_id, "status", new_status.value)
+
+    @staticmethod
+    async def transfer_status(
+        file_id: str,
+        statuses: set[TwexStatus],
+        new_status: TwexStatus,
+    ) -> None:
+        twex_status = await db.hget(name=file_id, key="status")
+        if twex_status is None:
+            raise AbortException(Ack(code=404))
+        if twex_status not in statuses:
+            raise AbortException(Ack(code=400, data=f"Wrong status: {twex_status}"))
+
+        if new_status is TwexStatus.FINISHED:
+            await db.delete(file_id)
+        else:
+            await db.hset(file_id, "status", new_status.value)
+
+    async def save(self) -> None:
+        await db.hset(
+            name=self.file_id,
+            mapping=self.model_dump(),  # type: ignore[arg-type]
+        )
 
 
 class MainNamespace(AsyncNamespace):  # type: ignore
@@ -37,17 +88,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         except ValidationError as e:
             return Ack(code=422, data=str(e)).model_dump()
 
-        file_id: str = uuid4().hex
-        await db.hset(
-            name=file_id,
-            mapping={
-                "file_name": args.file_name,
-                "status": TwexStatus.OPEN.value,
-            },
-        )
+        try:
+            twex = Twex(file_name=args.file_name)
+            await twex.save()
+        except AbortException as e:
+            return e.ack.model_dump()
 
-        self.enter_room(sid=sid, room=f"{file_id}-publishers")
-        return Ack(code=201, data={"file_id": file_id}).model_dump()
+        self.enter_room(sid=sid, room=f"{twex.file_id}-publishers")
+        return Ack(code=201, data={"file_id": twex.file_id}).model_dump()
 
     class FileIdArgs(BaseModel):
         file_id: str
@@ -61,13 +109,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         except ValidationError as e:
             return Ack(code=422, data=str(e)).model_dump()
 
-        twex = await db.hgetall(name=args.file_id)
-        if twex is None:
-            return Ack(code=404).model_dump()
-        if twex["status"] != TwexStatus.OPEN:
-            return Ack(code=400, data=f"Wrong status: {twex['status']}").model_dump()
-        await db.hset(args.file_id, "status", TwexStatus.FULL.value)
-        # TODO more control over FULL for non-dialog twexes
+        try:
+            twex: Twex = await Twex.find_with_status(
+                file_id=args.file_id, statuses={TwexStatus.OPEN}
+            )
+            await twex.update_status(new_status=TwexStatus.FULL)
+            # TODO more control over FULL for non-dialog twexes
+        except AbortException as e:
+            return e.ack.model_dump()
 
         self.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
         await self.emit(
@@ -87,12 +136,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         except ValidationError as e:
             return Ack(code=422, data=str(e)).model_dump()
 
-        twex_status = await db.hget(name=args.file_id, key="status")
-        if twex_status is None:
-            return Ack(code=404).model_dump()
-        if twex_status not in {TwexStatus.FULL, TwexStatus.CONFIRMED}:
-            return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
-        await db.hset(args.file_id, "status", TwexStatus.SENT.value)
+        try:
+            await Twex.transfer_status(
+                file_id=args.file_id,
+                statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
+                new_status=TwexStatus.SENT,
+            )
+        except AbortException as e:
+            return e.ack.model_dump()
 
         chunk_id: str = uuid4().hex
         await self.emit(
@@ -112,12 +163,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         except ValidationError as e:
             return Ack(code=422, data=str(e)).model_dump()
 
-        twex_status = await db.hget(name=args.file_id, key="status")
-        if twex_status is None:
-            return Ack(code=404).model_dump()
-        if twex_status != TwexStatus.SENT:
-            return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
-        await db.hset(args.file_id, "status", TwexStatus.CONFIRMED.value)
+        try:
+            await Twex.transfer_status(
+                file_id=args.file_id,
+                statuses={TwexStatus.SENT},
+                new_status=TwexStatus.CONFIRMED,
+            )
+        except AbortException as e:
+            return e.ack.model_dump()
 
         await self.emit(
             event="confirm",
@@ -136,12 +189,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         except ValidationError as e:
             return Ack(code=422, data=str(e)).model_dump()
 
-        twex_status = await db.hget(name=args.file_id, key="status")
-        if twex_status is None:
-            return Ack(code=404).model_dump()
-        if twex_status != TwexStatus.CONFIRMED:
-            return Ack(code=400, data=f"Wrong status: {twex_status}").model_dump()
-        await db.delete(args.file_id)
+        try:
+            await Twex.transfer_status(
+                file_id=args.file_id,
+                statuses={TwexStatus.CONFIRMED},
+                new_status=TwexStatus.FINISHED,
+            )
+        except AbortException as e:
+            return e.ack.model_dump()
 
         await self.emit(
             event="finish",
