@@ -5,7 +5,7 @@ from tests.testing import AsyncSIOTestClient
 
 
 @pytest.mark.anyio
-async def test_basic(
+async def test_main_flow(
     sender: AsyncSIOTestClient,
     receiver: AsyncSIOTestClient,
     faker: Faker,
