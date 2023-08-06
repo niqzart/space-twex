@@ -36,6 +36,29 @@ def decode_annotation(annotation: Any) -> tuple[Any, Any] | tuple[None, None]:
     return None, None
 
 
+class ExpandableArgument:
+    def __init__(self, base: type[BaseModel]) -> None:
+        self.base = base
+        self.fields: dict[str, tuple[type, Any]] = {}
+        self.depends: dict[str, set[Dependency | None]] = {}
+
+    def add_field(
+        self, name: str, type_: Any, default: Any, dependency: Dependency | None = None
+    ) -> None:
+        # TODO validate repeat's type
+        if default is Parameter.empty:
+            default = ...
+        self.fields[name] = (type_, default)
+        self.depends.setdefault(name, set()).add(dependency)
+
+    def convert(self) -> type[BaseModel]:
+        return create_model(  # type: ignore[call-overload, no-any-return]
+            f"{self.base.__qualname__}.Expanded",
+            __base__=self.base,
+            **self.fields,
+        )
+
+
 class SessionID:
     pass
 
@@ -46,7 +69,13 @@ class Depends:
 
 
 class Dependency:
-    def __init__(self, depends: Depends, request: Request):
+    def __init__(
+        self,
+        depends: Depends,
+        request: Request,
+        arg_types: list[type | ExpandableArgument],
+        first_expandable_argument: ExpandableArgument | None,
+    ):
         self.qualname: str = depends.dependency.__qualname__
         self.dependency = depends.dependency
 
@@ -59,14 +88,36 @@ class Dependency:
                 global_ns = getattr(self.dependency, "__globals__", {})
                 ann = eval_type_lenient(ann, global_ns, request.local_ns)
 
-            if isinstance(ann, type) and issubclass(ann, Request):
-                self.kwargs[param.name] = request
+            if isinstance(ann, type):
+                if issubclass(ann, Request):
+                    self.kwargs[param.name] = request
+                elif first_expandable_argument is None:
+                    # TODO better error message or auto-creation of first expandable
+                    raise Exception("No expandable arguments found")
+                else:
+                    first_expandable_argument.add_field(
+                        param.name, ann, param.default, self
+                    )
             else:
                 type_, decoded = decode_annotation(ann)
                 if isinstance(decoded, Depends):
                     self.unresolved[decoded.dependency.__qualname__] = param.name
                 elif isinstance(decoded, SessionID):
                     self.kwargs[param.name] = request.sid
+                elif isinstance(decoded, int):
+                    if len(arg_types) <= decoded:
+                        raise Exception(
+                            f"Param {param} {ann} can't be saved to [{decoded}]: "
+                            f"only {len(arg_types)} are present"
+                        )
+                    argument_type = arg_types[decoded]
+                    if isinstance(argument_type, ExpandableArgument):
+                        argument_type.add_field(param.name, type_, param.default, self)
+                    else:
+                        raise Exception(
+                            f"Param {param} {ann} can't be saved to "
+                            f"{argument_type} at [{decoded}]"
+                        )
                 else:
                     raise NotImplementedError(f"Parameter {param} {ann} not supported")
 
@@ -75,24 +126,6 @@ class Dependency:
             raise Exception("Not all sub-dependencies were resolved")
 
         return await call_or_await(self.dependency, **self.kwargs)
-
-
-class ExpandableArgument:
-    def __init__(self, base: type[BaseModel]) -> None:
-        self.base = base
-        self.fields: dict[str, tuple[type, Any]] = {}
-
-    def add_field(self, name: str, type_: Any, default: Any) -> None:
-        if default is Parameter.empty:
-            default = ...
-        self.fields[name] = (type_, default)
-
-    def convert(self) -> type[BaseModel]:
-        return create_model(  # type: ignore[call-overload, no-any-return]
-            f"{self.base.__qualname__}.Expanded",
-            __base__=self.base,
-            **self.fields,
-        )
 
 
 class Request:
@@ -114,7 +147,7 @@ class Request:
         # parsing the signature
         arg_types: list[type | ExpandableArgument] = []
         first_expandable_argument: ExpandableArgument | None = None
-        dependencies: dict[str, Dependency] = {}
+        dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
         for param in signature(handler).parameters.values():
             ann: Any = param.annotation
             if isinstance(ann, str):
@@ -139,7 +172,12 @@ class Request:
             else:
                 type_, decoded = decode_annotation(ann)
                 if isinstance(decoded, Depends):
-                    dependencies[param.name] = Dependency(decoded, self)
+                    dependencies[param.name] = Dependency(
+                        decoded,
+                        self,
+                        arg_types,
+                        first_expandable_argument,
+                    )
                 elif isinstance(decoded, SessionID):
                     kwargs[param.name] = self.sid
                 elif isinstance(decoded, int):
@@ -182,40 +220,59 @@ class Request:
             args: list[Any] = []
             for i, arg_type in enumerate(arg_types):
                 if isinstance(arg_type, ExpandableArgument):
-                    result = getattr(converted, str(i))
+                    result: BaseModel = getattr(converted, str(i))
                     args.append(
                         arg_type.base.model_validate(
-                            result.model_dump(exclude=arg_type.fields.keys())
+                            result.model_dump(
+                                include=set(arg_type.base.model_fields.keys())
+                            )
                         )
                     )
                     for field_name in arg_type.fields:
-                        kwargs[field_name] = getattr(result, field_name)
+                        for dependency in arg_type.depends[field_name]:
+                            if dependency is None:
+                                kwargs[field_name] = getattr(result, field_name)
+                            else:
+                                dependency.kwargs[field_name] = getattr(
+                                    result, field_name
+                                )
                 else:
                     args.append(arg_type)
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        # resolving dependencies
-        while len(dependencies) != 0:
-            layer: list[str] = []  # qualnames of the layer
-            for name, dependency in dependencies.items():
-                for resolved in layer:
-                    param_name = dependency.unresolved.pop(resolved, None)
-                    if param_name is not None:
-                        dependency.kwargs[param_name] = kwargs[resolved]
-                layer = []
-                if len(dependency.unresolved) == 0:
-                    layer.append(dependency.qualname)
-                    kwargs[name] = await dependency.execute()
-
-        # call the function
         try:
+            # resolving dependencies
+            while len(dependencies) != 0:
+                layer: list[
+                    tuple[str, str]
+                ] = []  # qualnames and param_names of the layer
+                for name, dependency in dependencies.items():
+                    for resolved, param_name in layer:
+                        dep_param_name = dependency.unresolved.pop(resolved, None)
+                        if dep_param_name is not None:
+                            dependency.kwargs[dep_param_name] = kwargs[param_name]
+                    layer = []
+                    if len(dependency.unresolved) == 0:
+                        layer.append((dependency.qualname, name))
+                        kwargs[name] = await dependency.execute()
+                for _, name in layer:
+                    dependencies.pop(name)
+
+            # call the function
             return await call_or_await(handler, *args, **kwargs)
         except AbortException as e:
             return e.ack
 
 
 Sid = Annotated[str, SessionID()]
+
+
+def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
+    async def twex_with_status_inner(file_id: str) -> Twex:
+        return await Twex.find_with_status(file_id=file_id, statuses=statuses)
+
+    return twex_with_status_inner
 
 
 class MainNamespace(AsyncNamespace):  # type: ignore
@@ -245,21 +302,24 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class FileIdArgs(BaseModel):
         file_id: str
 
-    class SubscribeArgs(FileIdArgs):
+    class SubscribeArgs(BaseModel):
         pass
 
-    async def on_subscribe(self, args: SubscribeArgs, /, sid: Sid) -> Ack:
-        twex: Twex = await Twex.find_with_status(
-            file_id=args.file_id, statuses={TwexStatus.OPEN}
-        )
+    async def on_subscribe(
+        self,
+        args: SubscribeArgs,
+        /,
+        sid: Sid,
+        twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
+    ) -> Ack:
         await twex.update_status(new_status=TwexStatus.FULL)
         # TODO more control over FULL for non-dialog twexes
 
-        self.enter_room(sid=sid, room=f"{args.file_id}-subscribers")
+        self.enter_room(sid=sid, room=f"{twex.file_id}-subscribers")
         await self.emit(
             event="subscribe",
-            data={**args.model_dump()},
-            room=f"{args.file_id}-publishers",
+            data={**args.model_dump(), "file_id": twex.file_id},
+            room=f"{twex.file_id}-publishers",
             skip_sid=sid,
         )
         return Ack(code=200, data=twex)
