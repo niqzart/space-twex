@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from inspect import iscoroutinefunction, signature
+from inspect import Parameter, iscoroutinefunction, signature
 from typing import Annotated, Any, TypeVar, get_args, get_origin
 from uuid import uuid4
 
@@ -28,12 +28,12 @@ async def call_or_await(
     raise Exception("Handler is not callable")
 
 
-def decode_annotation(annotation: Any) -> Any | None:
+def decode_annotation(annotation: Any) -> tuple[Any, Any] | tuple[None, None]:
     if get_origin(annotation) is Annotated:
         annotation_args = get_args(annotation)
         if len(annotation_args) == 2:
-            return annotation_args[1]
-    return None
+            return annotation_args  # type: ignore[return-value]
+    return None, None
 
 
 class SessionID:
@@ -62,7 +62,7 @@ class Dependency:
             if isinstance(ann, type) and issubclass(ann, Request):
                 self.kwargs[param.name] = request
             else:
-                decoded = decode_annotation(ann)
+                type_, decoded = decode_annotation(ann)
                 if isinstance(decoded, Depends):
                     self.unresolved[decoded.dependency.__qualname__] = param.name
                 elif isinstance(decoded, SessionID):
@@ -75,6 +75,24 @@ class Dependency:
             raise Exception("Not all sub-dependencies were resolved")
 
         return await call_or_await(self.dependency, **self.kwargs)
+
+
+class ExpandableArgument:
+    def __init__(self, base: type[BaseModel]) -> None:
+        self.base = base
+        self.fields: dict[str, tuple[type, Any]] = {}
+
+    def add_field(self, name: str, type_: Any, default: Any) -> None:
+        if default is Parameter.empty:
+            default = ...
+        self.fields[name] = (type_, default)
+
+    def convert(self) -> type[BaseModel]:
+        return create_model(  # type: ignore[call-overload, no-any-return]
+            f"{self.base.__qualname__}.Expanded",
+            __base__=self.base,
+            **self.fields,
+        )
 
 
 class Request:
@@ -94,8 +112,8 @@ class Request:
         kwargs: dict[str, Any] = {}  # qualname to value
 
         # parsing the signature
-        arg_names: list[str] = []
-        arg_types: list[type] = []
+        arg_types: list[type | ExpandableArgument] = []
+        first_expandable_argument: ExpandableArgument | None = None
         dependencies: dict[str, Dependency] = {}
         for param in signature(handler).parameters.values():
             ann: Any = param.annotation
@@ -106,15 +124,38 @@ class Request:
             if isinstance(ann, type):
                 if issubclass(ann, Request):
                     kwargs[param.name] = self
+                elif param.kind == param.POSITIONAL_ONLY:
+                    if issubclass(ann, BaseModel):
+                        expandable_argument = ExpandableArgument(ann)
+                        if first_expandable_argument is None:
+                            first_expandable_argument = expandable_argument
+                        arg_types.append(expandable_argument)
+                    else:
+                        arg_types.append(ann)
+                elif first_expandable_argument is None:
+                    raise Exception("No expandable arguments found")
                 else:
-                    arg_names.append(param.name)
-                    arg_types.append(ann)
+                    first_expandable_argument.add_field(param.name, ann, param.default)
             else:
-                decoded = decode_annotation(ann)
+                type_, decoded = decode_annotation(ann)
                 if isinstance(decoded, Depends):
                     dependencies[param.name] = Dependency(decoded, self)
                 elif isinstance(decoded, SessionID):
                     kwargs[param.name] = self.sid
+                elif isinstance(decoded, int):
+                    if len(arg_types) <= decoded:
+                        raise Exception(
+                            f"Param {param} {ann} can't be saved to [{decoded}]: "
+                            f"only {len(arg_types)} are present"
+                        )
+                    argument_type = arg_types[decoded]
+                    if isinstance(argument_type, ExpandableArgument):
+                        argument_type.add_field(param.name, type_, param.default)
+                    else:
+                        raise Exception(
+                            f"Param {param} {ann} can't be saved to "
+                            f"{argument_type} at [{decoded}]"
+                        )
                 else:
                     raise NotImplementedError(f"Parameter {param} {ann} not supported")
 
@@ -124,16 +165,33 @@ class Request:
                 code=422,
                 data=f"Required {len(arg_types)}, but {len(self.arguments)} given",
             )
+
+        field_types = [
+            arg_type.convert() if isinstance(arg_type, ExpandableArgument) else arg_type
+            for arg_type in arg_types
+        ]
         # RootModel(tuple(arg_types))
         arg_model = create_model(  # type: ignore[call-overload]
-            "InputModel", **{key: (ann, ...) for key, ann in zip(arg_names, arg_types)}
+            "InputModel", **{str(i): (ann, ...) for i, ann in enumerate(field_types)}
         )
 
         try:
-            args: BaseModel = arg_model.model_validate(
-                dict(zip(arg_names, self.arguments))
+            converted = arg_model.model_validate(
+                {str(i): ann for i, ann in enumerate(self.arguments)}
             )
-            kwargs.update({name: getattr(args, name) for name in arg_names})
+            args: list[Any] = []
+            for i, arg_type in enumerate(arg_types):
+                if isinstance(arg_type, ExpandableArgument):
+                    result = getattr(converted, str(i))
+                    args.append(
+                        arg_type.base.model_validate(
+                            result.model_dump(exclude=arg_type.fields.keys())
+                        )
+                    )
+                    for field_name in arg_type.fields:
+                        kwargs[field_name] = getattr(result, field_name)
+                else:
+                    args.append(arg_type)
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
@@ -152,7 +210,7 @@ class Request:
 
         # call the function
         try:
-            return await call_or_await(handler, **kwargs)
+            return await call_or_await(handler, *args, **kwargs)
         except AbortException as e:
             return e.ack
 
@@ -177,7 +235,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class CreateArgs(BaseModel):
         file_name: str
 
-    async def on_create(self, sid: Sid, args: CreateArgs) -> Ack:
+    async def on_create(self, args: CreateArgs, /, sid: Sid) -> Ack:
         twex = Twex(file_name=args.file_name)
         await twex.save()
 
@@ -190,7 +248,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class SubscribeArgs(FileIdArgs):
         pass
 
-    async def on_subscribe(self, sid: Sid, args: SubscribeArgs) -> Ack:
+    async def on_subscribe(self, args: SubscribeArgs, /, sid: Sid) -> Ack:
         twex: Twex = await Twex.find_with_status(
             file_id=args.file_id, statuses={TwexStatus.OPEN}
         )
@@ -209,7 +267,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class SendArgs(FileIdArgs):
         chunk: bytes
 
-    async def on_send(self, sid: Sid, args: SendArgs) -> Ack:
+    async def on_send(self, args: SendArgs, /, sid: Sid) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
@@ -228,7 +286,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class ConfirmArgs(FileIdArgs):
         chunk_id: str
 
-    async def on_confirm(self, sid: Sid, args: ConfirmArgs) -> Ack:
+    async def on_confirm(self, args: ConfirmArgs, /, sid: Sid) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.SENT},
@@ -246,7 +304,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class FinishArgs(FileIdArgs):
         pass
 
-    async def on_finish(self, sid: Sid, args: FinishArgs) -> Ack:
+    async def on_finish(self, args: FinishArgs, /, sid: Sid) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.CONFIRMED},
