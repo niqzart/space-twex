@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from inspect import Parameter, iscoroutinefunction, signature
+from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
+from inspect import (
+    Parameter,
+    isasyncgenfunction,
+    iscoroutinefunction,
+    isgeneratorfunction,
+    signature,
+)
 from typing import Annotated, Any, TypeVar, get_args, get_origin
 from uuid import uuid4
 
@@ -121,10 +128,16 @@ class Dependency:
                 else:
                     raise NotImplementedError(f"Parameter {param} {ann} not supported")
 
-    async def execute(self) -> Any:
+    async def execute(self, stack: AsyncExitStack) -> Any:
         if len(self.unresolved) != 0:
             raise Exception("Not all sub-dependencies were resolved")
 
+        if isasyncgenfunction(self.dependency):
+            return await stack.enter_async_context(
+                asynccontextmanager(self.dependency)(**self.kwargs)
+            )
+        elif isgeneratorfunction(self.dependency):
+            return stack.enter_context(contextmanager(self.dependency)(**self.kwargs))
         return await call_or_await(self.dependency, **self.kwargs)
 
 
@@ -242,25 +255,29 @@ class Request:
             return Ack(code=422, data=str(e))
 
         try:
-            # resolving dependencies
-            while len(dependencies) != 0:
-                layer: list[
-                    tuple[str, str]
-                ] = []  # qualnames and param_names of the layer
-                for name, dependency in dependencies.items():
-                    for resolved, param_name in layer:
-                        dep_param_name = dependency.unresolved.pop(resolved, None)
-                        if dep_param_name is not None:
-                            dependency.kwargs[dep_param_name] = kwargs[param_name]
-                    layer = []
-                    if len(dependency.unresolved) == 0:
-                        layer.append((dependency.qualname, name))
-                        kwargs[name] = await dependency.execute()
-                for _, name in layer:
-                    dependencies.pop(name)
+            async with AsyncExitStack() as stack:
+                # resolving dependencies
+                while len(dependencies) != 0:
+                    layer: list[
+                        tuple[str, str]
+                    ] = []  # qualnames and param_names of the layer
+                    for name, dependency in dependencies.items():
+                        for resolved, param_name in layer:
+                            dep_param_name = dependency.unresolved.pop(resolved, None)
+                            if dep_param_name is not None:
+                                dependency.kwargs[dep_param_name] = kwargs[param_name]
+                        layer = []
+                        if len(dependency.unresolved) == 0:
+                            layer.append((dependency.qualname, name))
+                            kwargs[name] = await dependency.execute(stack)
+                    for _, name in layer:
+                        dependencies.pop(name)
 
-            # call the function
-            return await call_or_await(handler, *args, **kwargs)
+                # call the function
+                return await call_or_await(handler, *args, **kwargs)
+            # this code is, in fact, reachable
+            # noinspection PyUnreachableCode
+            return None  # TODO `with` above can lead to no return
         except AbortException as e:
             return e.ack
 
