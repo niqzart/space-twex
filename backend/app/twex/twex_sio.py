@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from inspect import (
     Parameter,
+    Signature,
     isasyncgenfunction,
     iscoroutinefunction,
     isgeneratorfunction,
@@ -22,6 +23,7 @@ from app.twex.twex_db import Twex, TwexStatus
 
 T = TypeVar("T")
 AnyCallable = Callable[..., Any]
+LocalNS = dict[str, Any]
 
 
 async def call_or_await(
@@ -81,7 +83,39 @@ class Depends:
         self.dependency = dependency
 
 
-class Dependency:
+class SignatureParser:
+    def __init__(self, func: AnyCallable, local_ns: LocalNS | None = None) -> None:
+        self.func: AnyCallable = func
+        self.signature: Signature = signature(func)
+        self.local_ns: LocalNS = local_ns or {}
+
+    def parse_positional_only(self, param: Parameter, ann: Any) -> None:
+        pass
+
+    def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
+        pass
+
+    def parse_annotated_kwarg(self, param: Parameter, *args: Any) -> None:
+        pass
+
+    def parse(self) -> None:
+        for param in self.signature.parameters.values():
+            annotation: Any = param.annotation  # TODO type the annotation
+            if isinstance(annotation, str):
+                global_ns = getattr(self.func, "__globals__", {})
+                annotation = eval_type_lenient(annotation, global_ns, self.local_ns)
+
+            if param.kind == param.POSITIONAL_ONLY:
+                self.parse_positional_only(param, annotation)
+            elif isinstance(annotation, type):
+                self.parse_typed_kwarg(param, annotation)
+            elif get_origin(annotation) is Annotated:
+                self.parse_annotated_kwarg(param, *get_args(annotation))
+            else:
+                raise NotImplementedError  # TODO errors
+
+
+class Dependency(SignatureParser):
     def __init__(
         self,
         depends: Depends,
@@ -90,62 +124,75 @@ class Dependency:
         first_expandable_argument: ExpandableArgument | None,
         request_positions: list[tuple[Dependency | None, str]],
         sid_positions: list[tuple[Dependency | None, str]],
-    ):
-        self.dependency: AnyCallable = depends.dependency
-
-        self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
+    ) -> None:
+        super().__init__(depends.dependency, local_ns)
         self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
 
-        for param in signature(depends.dependency).parameters.values():
-            ann: Any = param.annotation
-            if isinstance(ann, str):
-                global_ns = getattr(self.dependency, "__globals__", {})
-                ann = eval_type_lenient(ann, global_ns, local_ns)
+        self.arg_types: list[type | ExpandableArgument] = arg_types
+        self.first_expandable_argument: ExpandableArgument | None = (
+            first_expandable_argument
+        )
+        # TODO use self.func or switch directions for argument lookup
+        self.request_positions: list[tuple[Dependency | None, str]] = request_positions
+        self.sid_positions: list[tuple[Dependency | None, str]] = sid_positions
 
-            if isinstance(ann, type):
-                if issubclass(ann, Request):
-                    request_positions.append((self, param.name))
-                elif first_expandable_argument is None:
-                    # TODO better error message or auto-creation of first expandable
-                    raise Exception("No expandable arguments found")
-                else:
-                    first_expandable_argument.add_field(
-                        param.name, ann, param.default, self
-                    )
+        # TODO postpone this more
+        self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
+
+    def parse_positional_only(self, param: Parameter, ann: Any) -> None:
+        raise Exception("No positional args allowed for dependencies")  # TODO errors
+
+    def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
+        if issubclass(type_, Request):
+            self.request_positions.append((self, param.name))
+        elif self.first_expandable_argument is None:
+            # TODO better error message or auto-creation of first expandable
+            raise Exception("No expandable arguments found")
+        else:
+            self.first_expandable_argument.add_field(
+                param.name, type_, param.default, self
+            )
+
+    def parse_double_annotated_kwarg(
+        self, param: Parameter, type_: Any, decoded: Any
+    ) -> None:
+        if isinstance(decoded, Depends):
+            self.unresolved[decoded.dependency] = param.name
+        elif isinstance(decoded, SessionID):
+            self.sid_positions.append((self, param.name))
+        elif isinstance(decoded, int):
+            if len(self.arg_types) <= decoded:
+                raise Exception(
+                    f"Param {param} can't be saved to [{decoded}]: "
+                    f"only {len(self.arg_types)} are present"
+                )
+            argument_type = self.arg_types[decoded]
+            if isinstance(argument_type, ExpandableArgument):
+                argument_type.add_field(param.name, type_, param.default, self)
             else:
-                type_, decoded = decode_annotation(ann)
-                if isinstance(decoded, Depends):
-                    self.unresolved[decoded.dependency] = param.name
-                elif isinstance(decoded, SessionID):
-                    sid_positions.append((self, param.name))
-                elif isinstance(decoded, int):
-                    if len(arg_types) <= decoded:
-                        raise Exception(
-                            f"Param {param} {ann} can't be saved to [{decoded}]: "
-                            f"only {len(arg_types)} are present"
-                        )
-                    argument_type = arg_types[decoded]
-                    if isinstance(argument_type, ExpandableArgument):
-                        argument_type.add_field(param.name, type_, param.default, self)
-                    else:
-                        raise Exception(
-                            f"Param {param} {ann} can't be saved to "
-                            f"{argument_type} at [{decoded}]"
-                        )
-                else:
-                    raise NotImplementedError(f"Parameter {param} {ann} not supported")
+                raise Exception(
+                    f"Param {param} can't be saved to "
+                    f"{argument_type} at [{decoded}]"
+                )
+        else:
+            raise NotImplementedError(f"Parameter {type_} {decoded} not supported")
 
-    async def execute(self, stack: AsyncExitStack) -> Any:
+    def parse_annotated_kwarg(self, param: Parameter, *args: Any) -> None:
+        if len(args) != 2:
+            raise Exception("Annotated supported with 2 args only")
+        self.parse_double_annotated_kwarg(param, *args)
+
+    async def execute(self, stack: AsyncExitStack) -> Any:  # TODO move out
         if len(self.unresolved) != 0:
             raise Exception("Not all sub-dependencies were resolved")
 
-        if isasyncgenfunction(self.dependency):
+        if isasyncgenfunction(self.func):
             return await stack.enter_async_context(
-                asynccontextmanager(self.dependency)(**self.kwargs)
+                asynccontextmanager(self.func)(**self.kwargs)
             )
-        elif isgeneratorfunction(self.dependency):
-            return stack.enter_context(contextmanager(self.dependency)(**self.kwargs))
-        return await call_or_await(self.dependency, **self.kwargs)
+        elif isgeneratorfunction(self.func):
+            return stack.enter_context(contextmanager(self.func)(**self.kwargs))
+        return await call_or_await(self.func, **self.kwargs)
 
 
 class Request:
@@ -202,6 +249,7 @@ class Request:
                         request_positions,
                         sid_positions,
                     )
+                    dependencies[param.name].parse()
                 elif isinstance(decoded, SessionID):
                     sid_positions.append((None, param.name))
                 elif isinstance(decoded, int):
@@ -284,7 +332,7 @@ class Request:
                                 dependency.kwargs[dep_param_name] = kwargs[param_name]
                         layer = []
                         if len(dependency.unresolved) == 0:
-                            layer.append((dependency.dependency, name))
+                            layer.append((dependency.func, name))
                             kwargs[name] = await dependency.execute(stack)
                     for _, name in layer:
                         dependencies.pop(name)
