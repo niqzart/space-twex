@@ -65,6 +65,11 @@ class ExpandableArgument:
             **self.fields,
         )
 
+    def clean(self, result: BaseModel) -> BaseModel:
+        return self.base.model_validate(
+            result.model_dump(include=set(self.base.model_fields.keys()))
+        )
+
 
 class SessionID:
     pass
@@ -79,9 +84,11 @@ class Dependency:
     def __init__(
         self,
         depends: Depends,
-        request: Request,
+        local_ns: dict[str, Any],
         arg_types: list[type | ExpandableArgument],
         first_expandable_argument: ExpandableArgument | None,
+        request_positions: list[tuple[Dependency | None, str]],
+        sid_positions: list[tuple[Dependency | None, str]],
     ):
         self.qualname: str = depends.dependency.__qualname__
         self.dependency = depends.dependency
@@ -93,11 +100,11 @@ class Dependency:
             ann: Any = param.annotation
             if isinstance(ann, str):
                 global_ns = getattr(self.dependency, "__globals__", {})
-                ann = eval_type_lenient(ann, global_ns, request.local_ns)
+                ann = eval_type_lenient(ann, global_ns, local_ns)
 
             if isinstance(ann, type):
                 if issubclass(ann, Request):
-                    self.kwargs[param.name] = request
+                    request_positions.append((self, param.name))
                 elif first_expandable_argument is None:
                     # TODO better error message or auto-creation of first expandable
                     raise Exception("No expandable arguments found")
@@ -110,7 +117,7 @@ class Dependency:
                 if isinstance(decoded, Depends):
                     self.unresolved[decoded.dependency.__qualname__] = param.name
                 elif isinstance(decoded, SessionID):
-                    self.kwargs[param.name] = request.sid
+                    sid_positions.append((self, param.name))
                 elif isinstance(decoded, int):
                     if len(arg_types) <= decoded:
                         raise Exception(
@@ -161,6 +168,8 @@ class Request:
         arg_types: list[type | ExpandableArgument] = []
         first_expandable_argument: ExpandableArgument | None = None
         dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
+        request_positions: list[tuple[Dependency | None, str]] = []
+        sid_positions: list[tuple[Dependency | None, str]] = []
         for param in signature(handler).parameters.values():
             ann: Any = param.annotation
             if isinstance(ann, str):
@@ -169,7 +178,7 @@ class Request:
 
             if isinstance(ann, type):
                 if issubclass(ann, Request):
-                    kwargs[param.name] = self
+                    request_positions.append((None, param.name))
                 elif param.kind == param.POSITIONAL_ONLY:
                     if issubclass(ann, BaseModel):
                         expandable_argument = ExpandableArgument(ann)
@@ -187,12 +196,14 @@ class Request:
                 if isinstance(decoded, Depends):
                     dependencies[param.name] = Dependency(
                         decoded,
-                        self,
+                        self.local_ns,
                         arg_types,
                         first_expandable_argument,
+                        request_positions,
+                        sid_positions,
                     )
                 elif isinstance(decoded, SessionID):
-                    kwargs[param.name] = self.sid
+                    sid_positions.append((None, param.name))
                 elif isinstance(decoded, int):
                     if len(arg_types) <= decoded:
                         raise Exception(
@@ -234,25 +245,30 @@ class Request:
             for i, arg_type in enumerate(arg_types):
                 if isinstance(arg_type, ExpandableArgument):
                     result: BaseModel = getattr(converted, str(i))
-                    args.append(
-                        arg_type.base.model_validate(
-                            result.model_dump(
-                                include=set(arg_type.base.model_fields.keys())
-                            )
-                        )
-                    )
+                    args.append(arg_type.clean(result))
                     for field_name in arg_type.fields:
+                        value = getattr(result, field_name)
                         for dependency in arg_type.depends[field_name]:
                             if dependency is None:
-                                kwargs[field_name] = getattr(result, field_name)
+                                kwargs[field_name] = value
                             else:
-                                dependency.kwargs[field_name] = getattr(
-                                    result, field_name
-                                )
+                                dependency.kwargs[field_name] = value
                 else:
                     args.append(arg_type)
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
+
+        for dependency, field_name in request_positions:
+            if dependency is None:
+                kwargs[field_name] = self
+            else:
+                dependency.kwargs[field_name] = self
+
+        for dependency, field_name in sid_positions:
+            if dependency is None:
+                kwargs[field_name] = self.sid
+            else:
+                dependency.kwargs[field_name] = self.sid
 
         try:
             async with AsyncExitStack() as stack:
