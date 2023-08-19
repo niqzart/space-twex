@@ -21,6 +21,7 @@ from app.common.sockets import AbortException, Ack
 from app.twex.twex_db import Twex, TwexStatus
 
 T = TypeVar("T")
+AnyCallable = Callable[..., Any]
 
 
 async def call_or_await(
@@ -76,7 +77,7 @@ class SessionID:
 
 
 class Depends:
-    def __init__(self, dependency: Callable[..., Any]) -> None:
+    def __init__(self, dependency: AnyCallable) -> None:
         self.dependency = dependency
 
 
@@ -90,11 +91,10 @@ class Dependency:
         request_positions: list[tuple[Dependency | None, str]],
         sid_positions: list[tuple[Dependency | None, str]],
     ):
-        self.qualname: str = depends.dependency.__qualname__
-        self.dependency = depends.dependency
+        self.dependency: AnyCallable = depends.dependency
 
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
-        self.unresolved: dict[str, str] = {}  # qualname to param_name
+        self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
 
         for param in signature(depends.dependency).parameters.values():
             ann: Any = param.annotation
@@ -115,7 +115,7 @@ class Dependency:
             else:
                 type_, decoded = decode_annotation(ann)
                 if isinstance(decoded, Depends):
-                    self.unresolved[decoded.dependency.__qualname__] = param.name
+                    self.unresolved[decoded.dependency] = param.name
                 elif isinstance(decoded, SessionID):
                     sid_positions.append((self, param.name))
                 elif isinstance(decoded, int):
@@ -275,8 +275,8 @@ class Request:
                 # resolving dependencies
                 while len(dependencies) != 0:
                     layer: list[
-                        tuple[str, str]
-                    ] = []  # qualnames and param_names of the layer
+                        tuple[AnyCallable, str]
+                    ] = []  # callables and param_names of the layer
                     for name, dependency in dependencies.items():
                         for resolved, param_name in layer:
                             dep_param_name = dependency.unresolved.pop(resolved, None)
@@ -284,7 +284,7 @@ class Request:
                                 dependency.kwargs[dep_param_name] = kwargs[param_name]
                         layer = []
                         if len(dependency.unresolved) == 0:
-                            layer.append((dependency.qualname, name))
+                            layer.append((dependency.dependency, name))
                             kwargs[name] = await dependency.execute(stack)
                     for _, name in layer:
                         dependencies.pop(name)
