@@ -118,14 +118,14 @@ class SignatureParser:
 class Dependency(SignatureParser):
     def __init__(
         self,
-        depends: Depends,
+        func: AnyCallable,
         local_ns: dict[str, Any],
         arg_types: list[type | ExpandableArgument],
         first_expandable_argument: ExpandableArgument | None,
         request_positions: list[tuple[Dependency | None, str]],
         sid_positions: list[tuple[Dependency | None, str]],
     ) -> None:
-        super().__init__(depends.dependency, local_ns)
+        super().__init__(func, local_ns)
         self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
 
         self.arg_types: list[type | ExpandableArgument] = arg_types
@@ -182,7 +182,7 @@ class Dependency(SignatureParser):
             raise Exception("Annotated supported with 2 args only")
         self.parse_double_annotated_kwarg(param, *args)
 
-    async def execute(self, stack: AsyncExitStack) -> Any:  # TODO move out
+    async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
         if len(self.unresolved) != 0:
             raise Exception("Not all sub-dependencies were resolved")
 
@@ -195,90 +195,83 @@ class Dependency(SignatureParser):
         return await call_or_await(self.func, **self.kwargs)
 
 
-class Request:
-    def __init__(
-        self,
-        event_name: str,
-        sid: str,
-        *arguments: Any,
-        ns: type | None = None,
+class Request(Dependency):
+    def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
+        super().__init__(
+            func=handler,
+            arg_types=[],
+            first_expandable_argument=None,
+            request_positions=[],
+            sid_positions=[],
+            local_ns={} if ns is None else dict(ns.__dict__),
+        )
+
+        # TODO use self.unresolved
+        self.dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
+
+    def parse_positional_only(self, param: Parameter, ann: Any) -> None:
+        if issubclass(ann, BaseModel):
+            expandable_argument = ExpandableArgument(ann)
+            if self.first_expandable_argument is None:
+                self.first_expandable_argument = expandable_argument
+            self.arg_types.append(expandable_argument)
+        else:
+            self.arg_types.append(ann)
+
+    def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
+        if issubclass(type_, Request):
+            self.request_positions.append((None, param.name))
+        elif self.first_expandable_argument is None:
+            raise Exception("No expandable arguments found")
+        else:
+            self.first_expandable_argument.add_field(param.name, type_, param.default)
+
+    def parse_double_annotated_kwarg(
+        self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
-        self.event_name: str = event_name
-        self.sid: str = sid
-        self.arguments: tuple[Any, ...] = arguments
-        self.local_ns: dict[str, Any] = {} if ns is None else dict(ns.__dict__)
-
-    async def execute(self, handler: Callable[..., Ack]) -> Ack | None:
-        kwargs: dict[str, Any] = {}  # qualname to value
-
-        # parsing the signature
-        arg_types: list[type | ExpandableArgument] = []
-        first_expandable_argument: ExpandableArgument | None = None
-        dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
-        request_positions: list[tuple[Dependency | None, str]] = []
-        sid_positions: list[tuple[Dependency | None, str]] = []
-        for param in signature(handler).parameters.values():
-            ann: Any = param.annotation
-            if isinstance(ann, str):
-                global_ns = getattr(handler, "__globals__", {})
-                ann = eval_type_lenient(ann, global_ns, self.local_ns)
-
-            if isinstance(ann, type):
-                if issubclass(ann, Request):
-                    request_positions.append((None, param.name))
-                elif param.kind == param.POSITIONAL_ONLY:
-                    if issubclass(ann, BaseModel):
-                        expandable_argument = ExpandableArgument(ann)
-                        if first_expandable_argument is None:
-                            first_expandable_argument = expandable_argument
-                        arg_types.append(expandable_argument)
-                    else:
-                        arg_types.append(ann)
-                elif first_expandable_argument is None:
-                    raise Exception("No expandable arguments found")
-                else:
-                    first_expandable_argument.add_field(param.name, ann, param.default)
+        if isinstance(decoded, Depends):
+            self.dependencies[param.name] = Dependency(
+                decoded.dependency,
+                self.local_ns,
+                self.arg_types,
+                self.first_expandable_argument,
+                self.request_positions,
+                self.sid_positions,
+            )
+            self.dependencies[param.name].parse()
+        elif isinstance(decoded, SessionID):
+            self.sid_positions.append((None, param.name))
+        elif isinstance(decoded, int):
+            if len(self.arg_types) <= decoded:
+                raise Exception(
+                    f"Param {param} can't be saved to [{decoded}]: "
+                    f"only {len(self.arg_types)} are present"
+                )
+            argument_type = self.arg_types[decoded]
+            if isinstance(argument_type, ExpandableArgument):
+                argument_type.add_field(param.name, type_, param.default)
             else:
-                type_, decoded = decode_annotation(ann)
-                if isinstance(decoded, Depends):
-                    dependencies[param.name] = Dependency(
-                        decoded,
-                        self.local_ns,
-                        arg_types,
-                        first_expandable_argument,
-                        request_positions,
-                        sid_positions,
-                    )
-                    dependencies[param.name].parse()
-                elif isinstance(decoded, SessionID):
-                    sid_positions.append((None, param.name))
-                elif isinstance(decoded, int):
-                    if len(arg_types) <= decoded:
-                        raise Exception(
-                            f"Param {param} {ann} can't be saved to [{decoded}]: "
-                            f"only {len(arg_types)} are present"
-                        )
-                    argument_type = arg_types[decoded]
-                    if isinstance(argument_type, ExpandableArgument):
-                        argument_type.add_field(param.name, type_, param.default)
-                    else:
-                        raise Exception(
-                            f"Param {param} {ann} can't be saved to "
-                            f"{argument_type} at [{decoded}]"
-                        )
-                else:
-                    raise NotImplementedError(f"Parameter {param} {ann} not supported")
+                raise Exception(
+                    f"Param {param} can't be saved to "
+                    f"{argument_type} at [{decoded}]"
+                )
+        else:
+            raise NotImplementedError(f"Parameter {type_} {decoded} not supported")
 
+    async def execute(
+        self, event_name: str, sid: str, *arguments: Any
+    ) -> Ack | None:  # TODO move out
+        # TODO use *actual* Request data-object
         # checking client arguments (positional-only because socketio)
-        if len(arg_types) != len(self.arguments):
+        if len(self.arg_types) != len(arguments):
             return Ack(
                 code=422,
-                data=f"Required {len(arg_types)}, but {len(self.arguments)} given",
+                data=f"Required {len(self.arg_types)}, but {len(arguments)} given",
             )
 
         field_types = [
             arg_type.convert() if isinstance(arg_type, ExpandableArgument) else arg_type
-            for arg_type in arg_types
+            for arg_type in self.arg_types
         ]
         # RootModel(tuple(arg_types))
         arg_model = create_model(  # type: ignore[call-overload]
@@ -287,10 +280,11 @@ class Request:
 
         try:
             converted = arg_model.model_validate(
-                {str(i): ann for i, ann in enumerate(self.arguments)}
+                {str(i): ann for i, ann in enumerate(arguments)}
             )
             args: list[Any] = []
-            for i, arg_type in enumerate(arg_types):
+            kwargs: dict[str, Any] = {}  # qualname to value
+            for i, arg_type in enumerate(self.arg_types):
                 if isinstance(arg_type, ExpandableArgument):
                     result: BaseModel = getattr(converted, str(i))
                     args.append(arg_type.clean(result))
@@ -306,26 +300,26 @@ class Request:
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        for dependency, field_name in request_positions:
+        for dependency, field_name in self.request_positions:
             if dependency is None:
                 kwargs[field_name] = self
             else:
                 dependency.kwargs[field_name] = self
 
-        for dependency, field_name in sid_positions:
+        for dependency, field_name in self.sid_positions:
             if dependency is None:
-                kwargs[field_name] = self.sid
+                kwargs[field_name] = sid
             else:
-                dependency.kwargs[field_name] = self.sid
+                dependency.kwargs[field_name] = sid
 
         try:
             async with AsyncExitStack() as stack:
                 # resolving dependencies
-                while len(dependencies) != 0:
+                while len(self.dependencies) != 0:
                     layer: list[
                         tuple[AnyCallable, str]
                     ] = []  # callables and param_names of the layer
-                    for name, dependency in dependencies.items():
+                    for name, dependency in self.dependencies.items():
                         for resolved, param_name in layer:
                             dep_param_name = dependency.unresolved.pop(resolved, None)
                             if dep_param_name is not None:
@@ -333,12 +327,12 @@ class Request:
                         layer = []
                         if len(dependency.unresolved) == 0:
                             layer.append((dependency.func, name))
-                            kwargs[name] = await dependency.execute(stack)
+                            kwargs[name] = await dependency.resolve(stack)
                     for _, name in layer:
-                        dependencies.pop(name)
+                        self.dependencies.pop(name)
 
                 # call the function
-                return await call_or_await(handler, *args, **kwargs)
+                return await call_or_await(self.func, *args, **kwargs)
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
@@ -363,8 +357,9 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         if handler is None:
             return None
 
-        request = Request(event, *args, ns=type(self))
-        result = await request.execute(handler)
+        request = Request(handler, ns=type(self))
+        request.parse()
+        result = await request.execute(event, *args)
         return None if result is None else result.model_dump()
 
     async def on_connect(self, sid: Sid) -> None:
