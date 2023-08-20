@@ -137,7 +137,7 @@ class Dependency(SignatureParser):
 
         # TODO postpone this more
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
-        self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
+        self.unresolved: dict[AnyCallable, list[str]] = {}  # callable to param_name
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
@@ -157,14 +157,15 @@ class Dependency(SignatureParser):
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
-            dependency = Dependency(
-                decoded.dependency,
-                self.local_ns,
-                self.context,
-            )
-            dependency.parse()
-            self.context.func_to_dep[decoded.dependency] = dependency
-            self.unresolved[decoded.dependency] = param.name
+            if decoded.dependency not in self.context.func_to_dep:
+                dependency = Dependency(
+                    decoded.dependency,
+                    self.local_ns,
+                    self.context,
+                )
+                dependency.parse()
+                self.context.func_to_dep[decoded.dependency] = dependency
+            self.unresolved.setdefault(decoded.dependency, []).append(param.name)
         elif isinstance(decoded, SessionID):
             self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
@@ -274,9 +275,8 @@ class Request(Dependency):
                     ]
                     for dependency in self.context.func_to_dep.values():
                         for resolved, value in layer:
-                            dep_param_name = dependency.unresolved.pop(resolved, None)
-                            if dep_param_name is not None:
-                                dependency.kwargs[dep_param_name] = value
+                            for field_name in dependency.unresolved.pop(resolved, []):
+                                dependency.kwargs[field_name] = value
 
                 # call the function
                 return await call_or_await(self.func, *args, **self.kwargs)
