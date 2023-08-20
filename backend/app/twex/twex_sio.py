@@ -133,11 +133,11 @@ class Dependency(SignatureParser):
         context: SPContext,
     ) -> None:
         super().__init__(func, local_ns)
-        self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
         self.context: SPContext = context
 
         # TODO postpone this more
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
+        self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
@@ -157,6 +157,14 @@ class Dependency(SignatureParser):
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
+            dependency = Dependency(
+                decoded.dependency,
+                self.local_ns,
+                self.context,
+            )
+            dependency.parse()
+            self.context.dependencies[param.name] = dependency
+            self.context.func_to_dep[decoded.dependency] = dependency
             self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
             self.context.sid_positions.append((self.func, param.name))
@@ -234,6 +242,7 @@ class Request(Dependency):
             dependency.parse()
             self.context.dependencies[param.name] = dependency
             self.context.func_to_dep[decoded.dependency] = dependency
+            self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
             self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
@@ -306,7 +315,7 @@ class Request(Dependency):
         try:
             async with AsyncExitStack() as stack:
                 # resolving dependencies
-                while len(self.context.dependencies) != 0:
+                while len(self.unresolved) != 0:
                     layer: list[
                         tuple[AnyCallable, str]
                     ] = []  # callables and param_names of the layer
@@ -319,8 +328,12 @@ class Request(Dependency):
                         if len(dependency.unresolved) == 0:
                             layer.append((dependency.func, name))
                             kwargs[name] = await dependency.resolve(stack)
-                    for _, name in layer:
+                    for resolved, name in layer:
                         self.context.dependencies.pop(name)
+                        # dep_param_name = \
+                        self.unresolved.pop(resolved, None)
+                        # if dep_param_name is not None:
+                        #     kwargs[dep_param_name] = kwargs[param_name]
 
                 # call the function
                 return await call_or_await(self.func, *args, **kwargs)
