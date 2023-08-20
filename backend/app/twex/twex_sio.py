@@ -219,47 +219,6 @@ class Request(Dependency):
         else:
             self.context.arg_types.append(ann)
 
-    def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        if issubclass(type_, Request):
-            self.context.request_positions.append((self.func, param.name))
-        elif self.context.first_expandable_argument is None:
-            raise Exception("No expandable arguments found")
-        else:
-            self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default, self
-            )
-
-    def parse_double_annotated_kwarg(
-        self, param: Parameter, type_: Any, decoded: Any
-    ) -> None:
-        if isinstance(decoded, Depends):
-            dependency = Dependency(
-                decoded.dependency,
-                self.local_ns,
-                self.context,
-            )
-            dependency.parse()
-            self.context.func_to_dep[decoded.dependency] = dependency
-            self.unresolved[decoded.dependency] = param.name
-        elif isinstance(decoded, SessionID):
-            self.context.sid_positions.append((self.func, param.name))
-        elif isinstance(decoded, int):
-            if len(self.context.arg_types) <= decoded:
-                raise Exception(
-                    f"Param {param} can't be saved to [{decoded}]: "
-                    f"only {len(self.context.arg_types)} are present"
-                )
-            argument_type = self.context.arg_types[decoded]
-            if isinstance(argument_type, ExpandableArgument):
-                argument_type.add_field(param.name, type_, param.default, self)
-            else:
-                raise Exception(
-                    f"Param {param} can't be saved to "
-                    f"{argument_type} at [{decoded}]"
-                )
-        else:
-            raise NotImplementedError(f"Parameter {type_} {decoded} not supported")
-
     async def execute(
         self, event_name: str, sid: str, *arguments: Any
     ) -> Ack | None:  # TODO move out
