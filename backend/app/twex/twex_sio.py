@@ -115,25 +115,23 @@ class SignatureParser:
                 raise NotImplementedError  # TODO errors
 
 
+class SPContext(BaseModel, arbitrary_types_allowed=True):
+    arg_types: list[type | ExpandableArgument] = []
+    first_expandable_argument: ExpandableArgument | None = None
+    request_positions: list[tuple[AnyCallable, str]] = []
+    sid_positions: list[tuple[AnyCallable, str]] = []
+
+
 class Dependency(SignatureParser):
     def __init__(
         self,
         func: AnyCallable,
         local_ns: dict[str, Any],
-        arg_types: list[type | ExpandableArgument],
-        first_expandable_argument: ExpandableArgument | None,
-        request_positions: list[tuple[AnyCallable, str]],
-        sid_positions: list[tuple[AnyCallable, str]],
+        context: SPContext,
     ) -> None:
         super().__init__(func, local_ns)
         self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
-
-        self.arg_types: list[type | ExpandableArgument] = arg_types
-        self.first_expandable_argument: ExpandableArgument | None = (
-            first_expandable_argument
-        )
-        self.request_positions: list[tuple[AnyCallable, str]] = request_positions
-        self.sid_positions: list[tuple[AnyCallable, str]] = sid_positions
+        self.context: SPContext = context
 
         # TODO postpone this more
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
@@ -143,12 +141,12 @@ class Dependency(SignatureParser):
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, Request):
-            self.request_positions.append((self.func, param.name))
-        elif self.first_expandable_argument is None:
+            self.context.request_positions.append((self.func, param.name))
+        elif self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
         else:
-            self.first_expandable_argument.add_field(
+            self.context.first_expandable_argument.add_field(
                 param.name, type_, param.default, self
             )
 
@@ -158,14 +156,14 @@ class Dependency(SignatureParser):
         if isinstance(decoded, Depends):
             self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
-            self.sid_positions.append((self.func, param.name))
+            self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
-            if len(self.arg_types) <= decoded:
+            if len(self.context.arg_types) <= decoded:
                 raise Exception(
                     f"Param {param} can't be saved to [{decoded}]: "
-                    f"only {len(self.arg_types)} are present"
+                    f"only {len(self.context.arg_types)} are present"
                 )
-            argument_type = self.arg_types[decoded]
+            argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
                 argument_type.add_field(param.name, type_, param.default, self)
             else:
@@ -198,10 +196,7 @@ class Request(Dependency):
     def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
         super().__init__(
             func=handler,
-            arg_types=[],
-            first_expandable_argument=None,
-            request_positions=[],
-            sid_positions=[],
+            context=SPContext(),
             local_ns={} if ns is None else dict(ns.__dict__),
         )
 
@@ -214,19 +209,21 @@ class Request(Dependency):
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         if issubclass(ann, BaseModel):
             expandable_argument = ExpandableArgument(ann)
-            if self.first_expandable_argument is None:
-                self.first_expandable_argument = expandable_argument
-            self.arg_types.append(expandable_argument)
+            if self.context.first_expandable_argument is None:
+                self.context.first_expandable_argument = expandable_argument
+            self.context.arg_types.append(expandable_argument)
         else:
-            self.arg_types.append(ann)
+            self.context.arg_types.append(ann)
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, Request):
-            self.request_positions.append((self.func, param.name))
-        elif self.first_expandable_argument is None:
+            self.context.request_positions.append((self.func, param.name))
+        elif self.context.first_expandable_argument is None:
             raise Exception("No expandable arguments found")
         else:
-            self.first_expandable_argument.add_field(param.name, type_, param.default)
+            self.context.first_expandable_argument.add_field(
+                param.name, type_, param.default
+            )
 
     def parse_double_annotated_kwarg(
         self, param: Parameter, type_: Any, decoded: Any
@@ -235,22 +232,19 @@ class Request(Dependency):
             self.dependencies[param.name] = Dependency(
                 decoded.dependency,
                 self.local_ns,
-                self.arg_types,
-                self.first_expandable_argument,
-                self.request_positions,
-                self.sid_positions,
+                self.context,
             )
             self.dependencies[param.name].parse()
             self.func_to_dep[decoded.dependency] = self.dependencies[param.name]
         elif isinstance(decoded, SessionID):
-            self.sid_positions.append((self.func, param.name))
+            self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
-            if len(self.arg_types) <= decoded:
+            if len(self.context.arg_types) <= decoded:
                 raise Exception(
                     f"Param {param} can't be saved to [{decoded}]: "
-                    f"only {len(self.arg_types)} are present"
+                    f"only {len(self.context.arg_types)} are present"
                 )
-            argument_type = self.arg_types[decoded]
+            argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
                 argument_type.add_field(param.name, type_, param.default)
             else:
@@ -266,15 +260,15 @@ class Request(Dependency):
     ) -> Ack | None:  # TODO move out
         # TODO use *actual* Request data-object
         # checking client arguments (positional-only because socketio)
-        if len(self.arg_types) != len(arguments):
+        if len(self.context.arg_types) != len(arguments):
             return Ack(
                 code=422,
-                data=f"Required {len(self.arg_types)}, but {len(arguments)} given",
+                data=f"Required {len(self.context.arg_types)}, but {len(arguments)} given",
             )
 
         field_types = [
             arg_type.convert() if isinstance(arg_type, ExpandableArgument) else arg_type
-            for arg_type in self.arg_types
+            for arg_type in self.context.arg_types
         ]
         # RootModel(tuple(arg_types))
         arg_model = create_model(  # type: ignore[call-overload]
@@ -287,7 +281,7 @@ class Request(Dependency):
             )
             args: list[Any] = []
             kwargs: dict[str, Any] = {}  # qualname to value
-            for i, arg_type in enumerate(self.arg_types):
+            for i, arg_type in enumerate(self.context.arg_types):
                 if isinstance(arg_type, ExpandableArgument):
                     result: BaseModel = getattr(converted, str(i))
                     args.append(arg_type.clean(result))
@@ -303,10 +297,10 @@ class Request(Dependency):
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        for func, field_name in self.request_positions:
+        for func, field_name in self.context.request_positions:
             self.func_to_dep[func].kwargs[field_name] = self
 
-        for func, field_name in self.sid_positions:
+        for func, field_name in self.context.sid_positions:
             self.func_to_dep[func].kwargs[field_name] = sid
 
         kwargs.update(self.kwargs)  # TODO remove after postponing
