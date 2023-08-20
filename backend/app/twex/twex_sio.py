@@ -22,8 +22,9 @@ from app.common.sockets import AbortException, Ack
 from app.twex.twex_db import Twex, TwexStatus
 
 T = TypeVar("T")
-AnyCallable = Callable[..., Any]
 LocalNS = dict[str, Any]
+AnyCallable = Callable[..., Any]
+Destination = tuple[AnyCallable, str]
 
 
 async def call_or_await(
@@ -119,9 +120,8 @@ class SignatureParser:
 class SPContext(BaseModel, arbitrary_types_allowed=True):
     arg_types: list[type | ExpandableArgument] = []
     first_expandable_argument: ExpandableArgument | None = None
-    request_positions: list[tuple[AnyCallable, str]] = []
-    sid_positions: list[tuple[AnyCallable, str]] = []
-    dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
+    request_positions: list[Destination] = []
+    sid_positions: list[Destination] = []
     func_to_dep: dict[AnyCallable, Dependency] = {}
 
 
@@ -163,7 +163,6 @@ class Dependency(SignatureParser):
                 self.context,
             )
             dependency.parse()
-            self.context.dependencies[param.name] = dependency
             self.context.func_to_dep[decoded.dependency] = dependency
             self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
@@ -240,7 +239,6 @@ class Request(Dependency):
                 self.context,
             )
             dependency.parse()
-            self.context.dependencies[param.name] = dependency
             self.context.func_to_dep[decoded.dependency] = dependency
             self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
@@ -310,30 +308,21 @@ class Request(Dependency):
         for func, field_name in self.context.sid_positions:
             self.context.func_to_dep[func].kwargs[field_name] = sid
 
-        kwargs.update(self.kwargs)  # TODO remove after postponing
-
         try:
             async with AsyncExitStack() as stack:
                 # resolving dependencies
                 while len(self.unresolved) != 0:
-                    layer: list[
-                        tuple[AnyCallable, str]
-                    ] = []  # callables and param_names of the layer
-                    for name, dependency in self.context.dependencies.items():
-                        for resolved, param_name in layer:
+                    layer: list[tuple[AnyCallable, Any]] = [
+                        (func, await dependency.resolve(stack))
+                        for func, dependency in self.context.func_to_dep.items()
+                        if len(dependency.unresolved) == 0
+                    ]
+                    for dependency in self.context.func_to_dep.values():
+                        for resolved, value in layer:
                             dep_param_name = dependency.unresolved.pop(resolved, None)
                             if dep_param_name is not None:
-                                dependency.kwargs[dep_param_name] = kwargs[param_name]
-                        layer = []
-                        if len(dependency.unresolved) == 0:
-                            layer.append((dependency.func, name))
-                            kwargs[name] = await dependency.resolve(stack)
-                    for resolved, name in layer:
-                        self.context.dependencies.pop(name)
-                        # dep_param_name = \
-                        self.unresolved.pop(resolved, None)
-                        # if dep_param_name is not None:
-                        #     kwargs[dep_param_name] = kwargs[param_name]
+                                dependency.kwargs[dep_param_name] = value
+                kwargs.update(self.kwargs)  # TODO remove after postponing
 
                 # call the function
                 return await call_or_await(self.func, *args, **kwargs)
