@@ -51,10 +51,10 @@ class ExpandableArgument:
     def __init__(self, base: type[BaseModel]) -> None:
         self.base = base
         self.fields: dict[str, tuple[type, Any]] = {}
-        self.depends: dict[str, set[Dependency | None]] = {}
+        self.depends: dict[str, set[Dependency]] = {}
 
     def add_field(
-        self, name: str, type_: Any, default: Any, dependency: Dependency | None = None
+        self, name: str, type_: Any, default: Any, dependency: Dependency
     ) -> None:
         # TODO replace Dependency /w AnyCallable
         # TODO validate repeat's type
@@ -226,7 +226,7 @@ class Request(Dependency):
             raise Exception("No expandable arguments found")
         else:
             self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default
+                param.name, type_, param.default, self
             )
 
     def parse_double_annotated_kwarg(
@@ -251,7 +251,7 @@ class Request(Dependency):
                 )
             argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
-                argument_type.add_field(param.name, type_, param.default)
+                argument_type.add_field(param.name, type_, param.default, self)
             else:
                 raise Exception(
                     f"Param {param} can't be saved to "
@@ -285,7 +285,6 @@ class Request(Dependency):
                 {str(i): ann for i, ann in enumerate(arguments)}
             )
             args: list[Any] = []
-            kwargs: dict[str, Any] = {}  # qualname to value
             for i, arg_type in enumerate(self.context.arg_types):
                 if isinstance(arg_type, ExpandableArgument):
                     result: BaseModel = getattr(converted, str(i))
@@ -293,10 +292,7 @@ class Request(Dependency):
                     for field_name in arg_type.fields:
                         value = getattr(result, field_name)
                         for dependency in arg_type.depends[field_name]:
-                            if dependency is None:
-                                kwargs[field_name] = value
-                            else:
-                                dependency.kwargs[field_name] = value
+                            dependency.kwargs[field_name] = value
                 else:
                     args.append(arg_type)
         except (ValidationError, AttributeError) as e:
@@ -322,10 +318,9 @@ class Request(Dependency):
                             dep_param_name = dependency.unresolved.pop(resolved, None)
                             if dep_param_name is not None:
                                 dependency.kwargs[dep_param_name] = value
-                kwargs.update(self.kwargs)  # TODO remove after postponing
 
                 # call the function
-                return await call_or_await(self.func, *args, **kwargs)
+                return await call_or_await(self.func, *args, **self.kwargs)
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
