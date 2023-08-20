@@ -55,6 +55,7 @@ class ExpandableArgument:
     def add_field(
         self, name: str, type_: Any, default: Any, dependency: Dependency | None = None
     ) -> None:
+        # TODO replace Dependency /w AnyCallable
         # TODO validate repeat's type
         if default is Parameter.empty:
             default = ...
@@ -120,6 +121,8 @@ class SPContext(BaseModel, arbitrary_types_allowed=True):
     first_expandable_argument: ExpandableArgument | None = None
     request_positions: list[tuple[AnyCallable, str]] = []
     sid_positions: list[tuple[AnyCallable, str]] = []
+    dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
+    func_to_dep: dict[AnyCallable, Dependency] = {}
 
 
 class Dependency(SignatureParser):
@@ -196,15 +199,9 @@ class Request(Dependency):
     def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
         super().__init__(
             func=handler,
-            context=SPContext(),
+            context=SPContext(func_to_dep={handler: self}),
             local_ns={} if ns is None else dict(ns.__dict__),
         )
-
-        # TODO use self.unresolved
-        self.dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
-        self.func_to_dep: dict[AnyCallable, Dependency] = {
-            self.func: self,
-        }
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         if issubclass(ann, BaseModel):
@@ -229,13 +226,14 @@ class Request(Dependency):
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
-            self.dependencies[param.name] = Dependency(
+            dependency = Dependency(
                 decoded.dependency,
                 self.local_ns,
                 self.context,
             )
-            self.dependencies[param.name].parse()
-            self.func_to_dep[decoded.dependency] = self.dependencies[param.name]
+            dependency.parse()
+            self.context.dependencies[param.name] = dependency
+            self.context.func_to_dep[decoded.dependency] = dependency
         elif isinstance(decoded, SessionID):
             self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
@@ -298,21 +296,21 @@ class Request(Dependency):
             return Ack(code=422, data=str(e))
 
         for func, field_name in self.context.request_positions:
-            self.func_to_dep[func].kwargs[field_name] = self
+            self.context.func_to_dep[func].kwargs[field_name] = self
 
         for func, field_name in self.context.sid_positions:
-            self.func_to_dep[func].kwargs[field_name] = sid
+            self.context.func_to_dep[func].kwargs[field_name] = sid
 
         kwargs.update(self.kwargs)  # TODO remove after postponing
 
         try:
             async with AsyncExitStack() as stack:
                 # resolving dependencies
-                while len(self.dependencies) != 0:
+                while len(self.context.dependencies) != 0:
                     layer: list[
                         tuple[AnyCallable, str]
                     ] = []  # callables and param_names of the layer
-                    for name, dependency in self.dependencies.items():
+                    for name, dependency in self.context.dependencies.items():
                         for resolved, param_name in layer:
                             dep_param_name = dependency.unresolved.pop(resolved, None)
                             if dep_param_name is not None:
@@ -322,7 +320,7 @@ class Request(Dependency):
                             layer.append((dependency.func, name))
                             kwargs[name] = await dependency.resolve(stack)
                     for _, name in layer:
-                        self.dependencies.pop(name)
+                        self.context.dependencies.pop(name)
 
                 # call the function
                 return await call_or_await(self.func, *args, **kwargs)
