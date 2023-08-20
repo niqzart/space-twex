@@ -122,8 +122,8 @@ class Dependency(SignatureParser):
         local_ns: dict[str, Any],
         arg_types: list[type | ExpandableArgument],
         first_expandable_argument: ExpandableArgument | None,
-        request_positions: list[tuple[Dependency | None, str]],
-        sid_positions: list[tuple[Dependency | None, str]],
+        request_positions: list[tuple[AnyCallable, str]],
+        sid_positions: list[tuple[AnyCallable, str]],
     ) -> None:
         super().__init__(func, local_ns)
         self.unresolved: dict[AnyCallable, str] = {}  # callable to param_name
@@ -132,9 +132,8 @@ class Dependency(SignatureParser):
         self.first_expandable_argument: ExpandableArgument | None = (
             first_expandable_argument
         )
-        # TODO use self.func or switch directions for argument lookup
-        self.request_positions: list[tuple[Dependency | None, str]] = request_positions
-        self.sid_positions: list[tuple[Dependency | None, str]] = sid_positions
+        self.request_positions: list[tuple[AnyCallable, str]] = request_positions
+        self.sid_positions: list[tuple[AnyCallable, str]] = sid_positions
 
         # TODO postpone this more
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
@@ -144,7 +143,7 @@ class Dependency(SignatureParser):
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, Request):
-            self.request_positions.append((self, param.name))
+            self.request_positions.append((self.func, param.name))
         elif self.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
@@ -159,7 +158,7 @@ class Dependency(SignatureParser):
         if isinstance(decoded, Depends):
             self.unresolved[decoded.dependency] = param.name
         elif isinstance(decoded, SessionID):
-            self.sid_positions.append((self, param.name))
+            self.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
             if len(self.arg_types) <= decoded:
                 raise Exception(
@@ -208,6 +207,9 @@ class Request(Dependency):
 
         # TODO use self.unresolved
         self.dependencies: dict[str, Dependency] = {}  # TODO keys as qualnames
+        self.func_to_dep: dict[AnyCallable, Dependency] = {
+            self.func: self,
+        }
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         if issubclass(ann, BaseModel):
@@ -220,7 +222,7 @@ class Request(Dependency):
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, Request):
-            self.request_positions.append((None, param.name))
+            self.request_positions.append((self.func, param.name))
         elif self.first_expandable_argument is None:
             raise Exception("No expandable arguments found")
         else:
@@ -239,8 +241,9 @@ class Request(Dependency):
                 self.sid_positions,
             )
             self.dependencies[param.name].parse()
+            self.func_to_dep[decoded.dependency] = self.dependencies[param.name]
         elif isinstance(decoded, SessionID):
-            self.sid_positions.append((None, param.name))
+            self.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
             if len(self.arg_types) <= decoded:
                 raise Exception(
@@ -300,17 +303,13 @@ class Request(Dependency):
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        for dependency, field_name in self.request_positions:
-            if dependency is None:
-                kwargs[field_name] = self
-            else:
-                dependency.kwargs[field_name] = self
+        for func, field_name in self.request_positions:
+            self.func_to_dep[func].kwargs[field_name] = self
 
-        for dependency, field_name in self.sid_positions:
-            if dependency is None:
-                kwargs[field_name] = sid
-            else:
-                dependency.kwargs[field_name] = sid
+        for func, field_name in self.sid_positions:
+            self.func_to_dep[func].kwargs[field_name] = sid
+
+        kwargs.update(self.kwargs)  # TODO remove after postponing
 
         try:
             async with AsyncExitStack() as stack:
