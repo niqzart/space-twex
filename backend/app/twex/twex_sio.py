@@ -134,10 +134,11 @@ class Dependency(SignatureParser):
     ) -> None:
         super().__init__(func, local_ns)
         self.context: SPContext = context
+        self.unresolved: dict[AnyCallable, list[str]] = {}  # callable to param_name
+        self.destinations: dict[AnyCallable, list[str]] = {}
 
         # TODO postpone this more
         self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
-        self.unresolved: dict[AnyCallable, list[str]] = {}  # callable to param_name
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
@@ -264,19 +265,31 @@ class Request(Dependency):
         for func, field_name in self.context.sid_positions:
             self.context.func_to_dep[func].kwargs[field_name] = sid
 
+        dependency_order: list[Dependency] = []
+
+        # resolving dependencies
+        while len(self.unresolved) != 0:  # TODO errors for cycles in DR
+            layer: list[Dependency] = [
+                dependency
+                for dependency in self.context.func_to_dep.values()
+                if len(dependency.unresolved) == 0
+            ]
+            dependency_order.extend(layer)
+            for dependency in self.context.func_to_dep.values():
+                for resolved in layer:  # TODO form destinations before this
+                    resolved.destinations[dependency.func] = dependency.unresolved.pop(
+                        resolved.func, []
+                    )
+
         try:
             async with AsyncExitStack() as stack:
-                # resolving dependencies
-                while len(self.unresolved) != 0:
-                    layer: list[tuple[AnyCallable, Any]] = [
-                        (func, await dependency.resolve(stack))
-                        for func, dependency in self.context.func_to_dep.items()
-                        if len(dependency.unresolved) == 0
-                    ]
-                    for dependency in self.context.func_to_dep.values():
-                        for resolved, value in layer:
-                            for field_name in dependency.unresolved.pop(resolved, []):
-                                dependency.kwargs[field_name] = value
+                for dependency in dependency_order:
+                    value = await dependency.resolve(stack)
+                    for destination, field_names in dependency.destinations.items():
+                        for field_name in field_names:
+                            self.context.func_to_dep[destination].kwargs[
+                                field_name
+                            ] = value
 
                 # call the function
                 return await call_or_await(self.func, *args, **self.kwargs)
