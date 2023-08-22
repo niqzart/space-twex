@@ -134,7 +134,7 @@ class Dependency(SignatureParser):
     ) -> None:
         super().__init__(func, local_ns)
         self.context: SPContext = context
-        self.unresolved: dict[AnyCallable, list[str]] = {}  # callable to param_name
+        self.unresolved: set[AnyCallable] = set()
         self.destinations: dict[AnyCallable, list[str]] = {}
 
         # TODO postpone this more
@@ -158,7 +158,8 @@ class Dependency(SignatureParser):
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
-            if decoded.dependency not in self.context.func_to_dep:
+            dependency = self.context.func_to_dep.get(decoded.dependency)
+            if dependency is None:
                 dependency = Dependency(
                     decoded.dependency,
                     self.local_ns,
@@ -166,7 +167,8 @@ class Dependency(SignatureParser):
                 )
                 dependency.parse()
                 self.context.func_to_dep[decoded.dependency] = dependency
-            self.unresolved.setdefault(decoded.dependency, []).append(param.name)
+            dependency.destinations.setdefault(self.func, []).append(param.name)
+            self.unresolved.add(decoded.dependency)
         elif isinstance(decoded, SessionID):
             self.context.sid_positions.append((self.func, param.name))
         elif isinstance(decoded, int):
@@ -192,9 +194,6 @@ class Dependency(SignatureParser):
         self.parse_double_annotated_kwarg(param, *args)
 
     async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
-        if len(self.unresolved) != 0:
-            raise Exception("Not all sub-dependencies were resolved")
-
         if isasyncgenfunction(self.func):
             return await stack.enter_async_context(
                 asynccontextmanager(self.func)(**self.kwargs)
@@ -276,10 +275,8 @@ class Request(Dependency):
             ]
             dependency_order.extend(layer)
             for dependency in self.context.func_to_dep.values():
-                for resolved in layer:  # TODO form destinations before this
-                    resolved.destinations[dependency.func] = dependency.unresolved.pop(
-                        resolved.func, []
-                    )
+                for resolved in layer:
+                    dependency.unresolved.discard(resolved.func)
 
         try:
             async with AsyncExitStack() as stack:
