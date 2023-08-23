@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
 from inspect import (
     Parameter,
@@ -220,67 +220,80 @@ class Request(Dependency):
         else:
             self.context.arg_types.append(ann)
 
-    async def execute(
-        self, event_name: str, sid: str, *arguments: Any
-    ) -> Ack | None:  # TODO move out
+    def generate_positional_fields(self) -> Iterator[type]:
+        for arg_type in self.context.arg_types:
+            if isinstance(arg_type, ExpandableArgument):
+                yield arg_type.convert()
+            else:  # TODO remove the isinstance check
+                yield arg_type
+
+    def resolve_dependencies(self) -> Iterator[Dependency]:
+        layer: list[Dependency]
+        while len(self.unresolved) != 0:  # TODO errors for cycles in DR
+            layer = [
+                dependency
+                for dependency in self.context.func_to_dep.values()
+                if len(dependency.unresolved) == 0
+            ]
+            yield from layer
+            for dependency in self.context.func_to_dep.values():
+                for resolved in layer:
+                    dependency.unresolved.discard(resolved.func)
+
+    def parse_arguments(
+        self, arg_model: type[BaseModel], arguments: tuple[Any, ...]
+    ) -> Iterator[Any]:
+        converted = arg_model.model_validate(
+            {str(i): ann for i, ann in enumerate(arguments)}
+        )
+        for i, arg_type in enumerate(self.context.arg_types):
+            if isinstance(arg_type, ExpandableArgument):
+                result: BaseModel = getattr(converted, str(i))
+                yield arg_type.clean(result)
+                for field_name in arg_type.fields:
+                    value = getattr(result, field_name)
+                    for dependency in arg_type.depends[field_name]:
+                        dependency.kwargs[field_name] = value
+            else:
+                yield arg_type
+
+    async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
         # TODO use *actual* Request data-object
-        # checking client arguments (positional-only because socketio)
+        # TODO extracting ClientEvent and Dependency objects
+        # TODO split into files
+        arg_model = create_model(  # type: ignore[call-overload]
+            "InputModel",  # TODO model name from event & namespace(?)
+            **{
+                str(i): (ann, ...)
+                for i, ann in enumerate(self.generate_positional_fields())
+            },
+        )
+        dependency_order: list[Dependency] = list(self.resolve_dependencies())
+
+        # TODO postpone everything after:
         if len(self.context.arg_types) != len(arguments):
             return Ack(
                 code=422,
                 data=f"Required {len(self.context.arg_types)}, but {len(arguments)} given",
             )
 
-        field_types = [
-            arg_type.convert() if isinstance(arg_type, ExpandableArgument) else arg_type
-            for arg_type in self.context.arg_types
-        ]
-        # RootModel(tuple(arg_types))
-        arg_model = create_model(  # type: ignore[call-overload]
-            "InputModel", **{str(i): (ann, ...) for i, ann in enumerate(field_types)}
-        )
-
         try:
-            converted = arg_model.model_validate(
-                {str(i): ann for i, ann in enumerate(arguments)}
-            )
-            args: list[Any] = []
-            for i, arg_type in enumerate(self.context.arg_types):
-                if isinstance(arg_type, ExpandableArgument):
-                    result: BaseModel = getattr(converted, str(i))
-                    args.append(arg_type.clean(result))
-                    for field_name in arg_type.fields:
-                        value = getattr(result, field_name)
-                        for dependency in arg_type.depends[field_name]:
-                            dependency.kwargs[field_name] = value
-                else:
-                    args.append(arg_type)
+            args: list[Any] = list(self.parse_arguments(arg_model, arguments))
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        for func, field_name in self.context.request_positions:
-            self.context.func_to_dep[func].kwargs[field_name] = self
-
-        for func, field_name in self.context.sid_positions:
-            self.context.func_to_dep[func].kwargs[field_name] = sid
-
-        dependency_order: list[Dependency] = []
-
-        # resolving dependencies
-        while len(self.unresolved) != 0:  # TODO errors for cycles in DR
-            layer: list[Dependency] = [
-                dependency
-                for dependency in self.context.func_to_dep.values()
-                if len(dependency.unresolved) == 0
-            ]
-            dependency_order.extend(layer)
-            for dependency in self.context.func_to_dep.values():
-                for resolved in layer:
-                    dependency.unresolved.discard(resolved.func)
+        for value, destinations in (  # TODO more expandability
+            (self, self.context.request_positions),
+            (sid, self.context.sid_positions),
+        ):
+            for func, field_name in destinations:
+                self.context.func_to_dep[func].kwargs[field_name] = value
 
         try:
             async with AsyncExitStack() as stack:
                 for dependency in dependency_order:
+                    if len(dependency.destinations) == 0:  # TODO redo
+                        continue
                     value = await dependency.resolve(stack)
                     for destination, field_names in dependency.destinations.items():
                         for field_name in field_names:
