@@ -51,17 +51,16 @@ class ExpandableArgument:
     def __init__(self, base: type[BaseModel]) -> None:
         self.base = base
         self.fields: dict[str, tuple[type, Any]] = {}
-        self.depends: dict[str, set[Dependency]] = {}
+        self.destinations: dict[str, list[AnyCallable]] = {}
 
     def add_field(
-        self, name: str, type_: Any, default: Any, dependency: Dependency
+        self, name: str, type_: Any, default: Any, dependency: AnyCallable
     ) -> None:
-        # TODO replace Dependency /w AnyCallable
         # TODO validate repeat's type
         if default is Parameter.empty:
             default = ...
         self.fields[name] = (type_, default)
-        self.depends.setdefault(name, set()).add(dependency)
+        self.destinations.setdefault(name, []).append(dependency)
 
     def convert(self) -> type[BaseModel]:
         return create_model(  # type: ignore[call-overload, no-any-return]
@@ -151,7 +150,7 @@ class Dependency(SignatureParser):
             raise Exception("No expandable arguments found")
         else:
             self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default, self
+                param.name, type_, param.default, self.func
             )
 
     def parse_double_annotated_kwarg(
@@ -179,7 +178,7 @@ class Dependency(SignatureParser):
                 )
             argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
-                argument_type.add_field(param.name, type_, param.default, self)
+                argument_type.add_field(param.name, type_, param.default, self.func)
             else:
                 raise Exception(
                     f"Param {param} can't be saved to "
