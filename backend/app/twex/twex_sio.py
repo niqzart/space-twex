@@ -68,11 +68,23 @@ class Depends:
         self.dependency = dependency
 
 
-class SignatureParser:
+class Runnable:
+    def __init__(self, func: Callable[..., T | Awaitable[T]]) -> None:
+        self.func = func
+
+    async def run(self, *args: Any, **kwargs: Any) -> T:
+        if iscoroutinefunction(self.func):
+            return await self.func(*args, **kwargs)  # type: ignore[no-any-return]
+        elif callable(self.func):
+            return self.func(*args, **kwargs)  # type: ignore[return-value]
+        raise Exception("Handler is not callable")
+
+
+class SignatureParser(Runnable):
     def __init__(
         self, func: Callable[..., T | Awaitable[T]], local_ns: LocalNS | None = None
     ) -> None:
-        self.func: Callable[..., T | Awaitable[T]] = func
+        super().__init__(func)
         self.signature: Signature = signature(func)
         self.local_ns: LocalNS = local_ns or {}
 
@@ -100,13 +112,6 @@ class SignatureParser:
                 self.parse_annotated_kwarg(param, *get_args(annotation))
             else:
                 raise NotImplementedError  # TODO errors
-
-    async def run(self, *args: Any, **kwargs: Any) -> T:
-        if iscoroutinefunction(self.func):
-            return await self.func(*args, **kwargs)  # type: ignore[no-any-return]
-        elif callable(self.func):
-            return self.func(*args, **kwargs)  # type: ignore[return-value]
-        raise Exception("Handler is not callable")
 
 
 class SPContext(BaseModel, arbitrary_types_allowed=True):
@@ -232,10 +237,43 @@ class Request(Dependency):
                 for resolved in layer:
                     dependency.unresolved.discard(resolved.func)
 
-    def parse_arguments(
-        self, arg_model: type[BaseModel], arguments: tuple[Any, ...]
-    ) -> Iterator[Any]:
-        converted = arg_model.model_validate(
+    def extract(self) -> ClientEvent:
+        self.parse()
+        return ClientEvent(
+            func=self.func,
+            context=self.context,
+            arg_model=create_model(  # type: ignore[call-overload]
+                "InputModel",  # TODO model name from event & namespace(?)
+                **{
+                    str(i): (ann, ...)
+                    for i, ann in enumerate(self.generate_positional_fields())
+                },
+            ),
+            arg_count=len(self.context.arg_types),
+            dependency_order=list(self.resolve_dependencies()),
+            kwargs=self.kwargs,
+        )
+
+
+class ClientEvent(Runnable):
+    def __init__(
+        self,
+        func: Callable[..., T | Awaitable[T]],
+        context: SPContext,
+        arg_model: type[BaseModel],
+        arg_count: int,
+        dependency_order: list[Dependency],
+        kwargs: Any,  # TODO move kwargs out of Request and Dependency
+    ):
+        super().__init__(func)
+        self.context = context
+        self.arg_model = arg_model
+        self.arg_count = arg_count
+        self.dependency_order = dependency_order
+        self.kwargs = kwargs
+
+    def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
+        converted = self.arg_model.model_validate(
             {str(i): ann for i, ann in enumerate(arguments)}
         )
         for i, arg_type in enumerate(self.context.arg_types):
@@ -251,26 +289,15 @@ class Request(Dependency):
 
     async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
         # TODO use *actual* Request data-object
-        # TODO extracting ClientEvent and Dependency objects
         # TODO split into files
-        arg_model = create_model(  # type: ignore[call-overload]
-            "InputModel",  # TODO model name from event & namespace(?)
-            **{
-                str(i): (ann, ...)
-                for i, ann in enumerate(self.generate_positional_fields())
-            },
-        )
-        dependency_order: list[Dependency] = list(self.resolve_dependencies())
-
-        # TODO postpone everything after this line
-        if len(self.context.arg_types) != len(arguments):
+        if len(arguments) != self.arg_count:
             return Ack(
                 code=422,
-                data=f"Required {len(self.context.arg_types)}, but {len(arguments)} given",
+                data=f"Required {self.arg_count}, but {len(arguments)} given",
             )
 
         try:
-            args: list[Any] = list(self.parse_arguments(arg_model, arguments))
+            args: list[Any] = list(self.parse_arguments(arguments))
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
@@ -283,7 +310,7 @@ class Request(Dependency):
 
         try:
             async with AsyncExitStack() as stack:
-                for dependency in dependency_order:
+                for dependency in self.dependency_order:
                     if len(dependency.destinations) == 0:  # TODO redo
                         continue
                     value = await dependency.resolve(stack)
@@ -320,8 +347,8 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             return None
 
         request = Request(handler, ns=type(self))
-        request.parse()
-        result = await request.execute(event, *args)
+        client_event = request.extract()
+        result = await client_event.execute(event, *args)
         return None if result is None else result.model_dump()
 
     async def on_connect(self, sid: Sid) -> None:
