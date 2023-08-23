@@ -27,26 +27,6 @@ AnyCallable = Callable[..., Any]
 Destination = tuple[AnyCallable, str]
 
 
-async def call_or_await(
-    handler: Callable[..., T | Awaitable[T]],
-    *args: Any,
-    **kwargs: Any,
-) -> T:
-    if iscoroutinefunction(handler) is True:
-        return await handler(*args, **kwargs)  # type: ignore[no-any-return, misc]
-    elif callable(handler):
-        return handler(*args, **kwargs)  # type: ignore[return-value]
-    raise Exception("Handler is not callable")
-
-
-def decode_annotation(annotation: Any) -> tuple[Any, Any] | tuple[None, None]:
-    if get_origin(annotation) is Annotated:
-        annotation_args = get_args(annotation)
-        if len(annotation_args) == 2:
-            return annotation_args  # type: ignore[return-value]
-    return None, None
-
-
 class ExpandableArgument:
     def __init__(self, base: type[BaseModel]) -> None:
         self.base = base
@@ -89,8 +69,10 @@ class Depends:
 
 
 class SignatureParser:
-    def __init__(self, func: AnyCallable, local_ns: LocalNS | None = None) -> None:
-        self.func: AnyCallable = func
+    def __init__(
+        self, func: Callable[..., T | Awaitable[T]], local_ns: LocalNS | None = None
+    ) -> None:
+        self.func: Callable[..., T | Awaitable[T]] = func
         self.signature: Signature = signature(func)
         self.local_ns: LocalNS = local_ns or {}
 
@@ -118,6 +100,13 @@ class SignatureParser:
                 self.parse_annotated_kwarg(param, *get_args(annotation))
             else:
                 raise NotImplementedError  # TODO errors
+
+    async def run(self, *args: Any, **kwargs: Any) -> T:
+        if iscoroutinefunction(self.func):
+            return await self.func(*args, **kwargs)  # type: ignore[no-any-return]
+        elif callable(self.func):
+            return self.func(*args, **kwargs)  # type: ignore[return-value]
+        raise Exception("Handler is not callable")
 
 
 class SPContext(BaseModel, arbitrary_types_allowed=True):
@@ -203,7 +192,7 @@ class Dependency(SignatureParser):
             )
         elif isgeneratorfunction(self.func):
             return stack.enter_context(contextmanager(self.func)(**self.kwargs))
-        return await call_or_await(self.func, **self.kwargs)
+        return await self.run(**self.kwargs)
 
 
 class Request(Dependency):
@@ -273,7 +262,7 @@ class Request(Dependency):
         )
         dependency_order: list[Dependency] = list(self.resolve_dependencies())
 
-        # TODO postpone everything after:
+        # TODO postpone everything after this line
         if len(self.context.arg_types) != len(arguments):
             return Ack(
                 code=422,
@@ -305,7 +294,7 @@ class Request(Dependency):
                             ] = value
 
                 # call the function
-                return await call_or_await(self.func, *args, **self.kwargs)
+                return await self.run(*args, **self.kwargs)
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
