@@ -56,10 +56,14 @@ class ExpandableArgument:
     def add_field(
         self, name: str, type_: Any, default: Any, dependency: AnyCallable
     ) -> None:
-        # TODO validate repeat's type
         if default is Parameter.empty:
             default = ...
-        self.fields[name] = (type_, default)
+        passed_field = type_, default
+        existing_field = self.fields.get(name)
+        if existing_field is None:
+            self.fields[name] = passed_field
+        elif existing_field != passed_field:
+            raise NotImplementedError("Duplicate with a different type")  # TODO errors
         self.destinations.setdefault(name, []).append(dependency)
 
     def convert(self) -> type[BaseModel]:
@@ -249,10 +253,10 @@ class Request(Dependency):
             if isinstance(arg_type, ExpandableArgument):
                 result: BaseModel = getattr(converted, str(i))
                 yield arg_type.clean(result)
-                for field_name in arg_type.fields:
+                for field_name, destinations in arg_type.destinations.items():
                     value = getattr(result, field_name)
-                    for dependency in arg_type.depends[field_name]:
-                        dependency.kwargs[field_name] = value
+                    for dependency in destinations:
+                        self.context.func_to_dep[dependency].kwargs[field_name] = value
             else:
                 yield arg_type
 
