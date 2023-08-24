@@ -20,10 +20,10 @@ from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import AbortException, Ack
 from app.twex.twex_db import Twex, TwexStatus
+from siox.markers import Depends, SessionID, Sid
+from siox.types import AnyCallable, LocalNS
 
 T = TypeVar("T")
-LocalNS = dict[str, Any]
-AnyCallable = Callable[..., Any]
 
 
 class ExpandableArgument:
@@ -58,15 +58,6 @@ class ExpandableArgument:
         )
 
 
-class SessionID:
-    pass
-
-
-class Depends:
-    def __init__(self, dependency: AnyCallable) -> None:
-        self.dependency = dependency
-
-
 class Runnable:
     def __init__(self, func: Callable[..., T | Awaitable[T]]) -> None:
         self.func = func
@@ -93,6 +84,77 @@ class Dependency(Runnable):
         elif isgeneratorfunction(self.func):
             return stack.enter_context(contextmanager(self.func)(**self.kwargs))
         return await self.run(**self.kwargs)
+
+
+class ClientEvent(Runnable):
+    def __init__(
+        self,
+        func: Callable[..., T | Awaitable[T]],
+        context: SPContext,
+        arg_model: type[BaseModel],
+        arg_count: int,
+        dependency_order: list[Dependency],
+        the_dep: Dependency,
+    ):
+        super().__init__(func)
+        self.context = context
+        self.arg_model = arg_model
+        self.arg_count = arg_count
+        self.dependency_order = dependency_order
+        self.the_dep = the_dep  # TODO naming
+
+    def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
+        converted = self.arg_model.model_validate(
+            {str(i): ann for i, ann in enumerate(arguments)}
+        )
+        for i, arg_type in enumerate(self.context.arg_types):
+            result: Any = getattr(converted, str(i))
+            if isinstance(arg_type, ExpandableArgument):
+                yield arg_type.clean(result)
+                for field_name, destinations in arg_type.destinations.items():
+                    value = getattr(result, field_name)
+                    for the_dep in destinations:
+                        the_dep.kwargs[field_name] = value
+            else:
+                yield result
+
+    async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
+        # TODO use *actual* Request data-object
+        # TODO split into files
+        if len(arguments) != self.arg_count:
+            return Ack(
+                code=422,
+                data=f"Required {self.arg_count}, but {len(arguments)} given",
+            )
+
+        try:
+            args: list[Any] = list(self.parse_arguments(arguments))
+        except (ValidationError, AttributeError) as e:
+            return Ack(code=422, data=str(e))
+
+        for value, destinations in (  # TODO more expandability
+            (self, self.context.request_positions),
+            (sid, self.context.sid_positions),
+        ):
+            for the_dep, field_name in destinations:
+                the_dep.kwargs[field_name] = value
+
+        try:
+            async with AsyncExitStack() as stack:
+                for dependency in self.dependency_order:
+                    # if len(dependency.destinations) == 0:  # TODO redo
+                    value = await dependency.resolve(stack)
+                    for destination, field_names in dependency.destinations.items():
+                        for field_name in field_names:
+                            destination.kwargs[field_name] = value
+
+                # call the function
+                return await self.run(*args, **self.the_dep.kwargs)
+            # this code is, in fact, reachable
+            # noinspection PyUnreachableCode
+            return None  # TODO `with` above can lead to no return
+        except AbortException as e:
+            return e.ack
 
 
 class SignatureParser:
@@ -258,80 +320,6 @@ class RequestSignature(DependencySignature):
             dependency_order=list(self.resolve_dependencies()),
             the_dep=self.the_dep,
         )
-
-
-class ClientEvent(Runnable):
-    def __init__(
-        self,
-        func: Callable[..., T | Awaitable[T]],
-        context: SPContext,
-        arg_model: type[BaseModel],
-        arg_count: int,
-        dependency_order: list[Dependency],
-        the_dep: Dependency,
-    ):
-        super().__init__(func)
-        self.context = context
-        self.arg_model = arg_model
-        self.arg_count = arg_count
-        self.dependency_order = dependency_order
-        self.the_dep = the_dep  # TODO naming
-
-    def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
-        converted = self.arg_model.model_validate(
-            {str(i): ann for i, ann in enumerate(arguments)}
-        )
-        for i, arg_type in enumerate(self.context.arg_types):
-            result: Any = getattr(converted, str(i))
-            if isinstance(arg_type, ExpandableArgument):
-                yield arg_type.clean(result)
-                for field_name, destinations in arg_type.destinations.items():
-                    value = getattr(result, field_name)
-                    for the_dep in destinations:
-                        the_dep.kwargs[field_name] = value
-            else:
-                yield result
-
-    async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
-        # TODO use *actual* Request data-object
-        # TODO split into files
-        if len(arguments) != self.arg_count:
-            return Ack(
-                code=422,
-                data=f"Required {self.arg_count}, but {len(arguments)} given",
-            )
-
-        try:
-            args: list[Any] = list(self.parse_arguments(arguments))
-        except (ValidationError, AttributeError) as e:
-            return Ack(code=422, data=str(e))
-
-        for value, destinations in (  # TODO more expandability
-            (self, self.context.request_positions),
-            (sid, self.context.sid_positions),
-        ):
-            for the_dep, field_name in destinations:
-                the_dep.kwargs[field_name] = value
-
-        try:
-            async with AsyncExitStack() as stack:
-                for dependency in self.dependency_order:
-                    # if len(dependency.destinations) == 0:  # TODO redo
-                    value = await dependency.resolve(stack)
-                    for destination, field_names in dependency.destinations.items():
-                        for field_name in field_names:
-                            destination.kwargs[field_name] = value
-
-                # call the function
-                return await self.run(*args, **self.the_dep.kwargs)
-            # this code is, in fact, reachable
-            # noinspection PyUnreachableCode
-            return None  # TODO `with` above can lead to no return
-        except AbortException as e:
-            return e.ack
-
-
-Sid = Annotated[str, SessionID()]
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
