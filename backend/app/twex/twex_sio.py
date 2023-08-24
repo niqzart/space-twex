@@ -24,17 +24,16 @@ from app.twex.twex_db import Twex, TwexStatus
 T = TypeVar("T")
 LocalNS = dict[str, Any]
 AnyCallable = Callable[..., Any]
-Destination = tuple[AnyCallable, str]
 
 
 class ExpandableArgument:
     def __init__(self, base: type[BaseModel]) -> None:
         self.base = base
         self.fields: dict[str, tuple[type, Any]] = {}
-        self.destinations: dict[str, list[AnyCallable]] = {}
+        self.destinations: dict[str, list[Dependency]] = {}
 
     def add_field(
-        self, name: str, type_: Any, default: Any, dependency: AnyCallable
+        self, name: str, type_: Any, default: Any, dependency: Dependency
     ) -> None:
         if default is Parameter.empty:
             default = ...
@@ -71,6 +70,7 @@ class Depends:
 class Runnable:
     def __init__(self, func: Callable[..., T | Awaitable[T]]) -> None:
         self.func = func
+        self.kwargs: dict[str, Any] = {}
 
     async def run(self, *args: Any, **kwargs: Any) -> T:
         if iscoroutinefunction(self.func):
@@ -80,11 +80,26 @@ class Runnable:
         raise Exception("Handler is not callable")
 
 
-class SignatureParser(Runnable):
+class Dependency(Runnable):
+    def __init__(self, func: Callable[..., T | Awaitable[T]]) -> None:
+        super().__init__(func)
+        self.destinations: dict[Dependency, list[str]] = {}
+
+    async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
+        if isasyncgenfunction(self.func):
+            return await stack.enter_async_context(
+                asynccontextmanager(self.func)(**self.kwargs)
+            )
+        elif isgeneratorfunction(self.func):
+            return stack.enter_context(contextmanager(self.func)(**self.kwargs))
+        return await self.run(**self.kwargs)
+
+
+class SignatureParser:
     def __init__(
         self, func: Callable[..., T | Awaitable[T]], local_ns: LocalNS | None = None
     ) -> None:
-        super().__init__(func)
+        self.func = func
         self.signature: Signature = signature(func)
         self.local_ns: LocalNS = local_ns or {}
 
@@ -117,12 +132,12 @@ class SignatureParser(Runnable):
 class SPContext(BaseModel, arbitrary_types_allowed=True):
     arg_types: list[type | ExpandableArgument] = []
     first_expandable_argument: ExpandableArgument | None = None
-    request_positions: list[Destination] = []
-    sid_positions: list[Destination] = []
-    func_to_dep: dict[AnyCallable, Dependency] = {}
+    request_positions: list[tuple[Dependency, str]] = []
+    sid_positions: list[tuple[Dependency, str]] = []
+    func_to_dep: dict[AnyCallable, DependencySignature] = {}
 
 
-class Dependency(SignatureParser):
+class DependencySignature(SignatureParser):
     def __init__(
         self,
         func: AnyCallable,
@@ -132,23 +147,20 @@ class Dependency(SignatureParser):
         super().__init__(func, local_ns)
         self.context: SPContext = context
         self.unresolved: set[AnyCallable] = set()
-        self.destinations: dict[AnyCallable, list[str]] = {}
-
-        # TODO postpone this more
-        self.kwargs: dict[str, Any] = {}  # param_name to value (kwargs)
+        self.the_dep: Dependency = Dependency(func)  # TODO naming
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        if issubclass(type_, Request):
-            self.context.request_positions.append((self.func, param.name))
+        if issubclass(type_, RequestSignature):
+            self.context.request_positions.append((self.the_dep, param.name))
         elif self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
         else:
             self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default, self.func
+                param.name, type_, param.default, self.the_dep
             )
 
     def parse_double_annotated_kwarg(
@@ -157,17 +169,19 @@ class Dependency(SignatureParser):
         if isinstance(decoded, Depends):
             dependency = self.context.func_to_dep.get(decoded.dependency)
             if dependency is None:
-                dependency = Dependency(
+                dependency = DependencySignature(
                     decoded.dependency,
                     self.local_ns,
                     self.context,
                 )
                 dependency.parse()
                 self.context.func_to_dep[decoded.dependency] = dependency
-            dependency.destinations.setdefault(self.func, []).append(param.name)
+            dependency.the_dep.destinations.setdefault(self.the_dep, []).append(
+                param.name
+            )
             self.unresolved.add(decoded.dependency)
         elif isinstance(decoded, SessionID):
-            self.context.sid_positions.append((self.func, param.name))
+            self.context.sid_positions.append((self.the_dep, param.name))
         elif isinstance(decoded, int):
             if len(self.context.arg_types) <= decoded:
                 raise Exception(
@@ -176,7 +190,7 @@ class Dependency(SignatureParser):
                 )
             argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
-                argument_type.add_field(param.name, type_, param.default, self.func)
+                argument_type.add_field(param.name, type_, param.default, self.the_dep)
             else:
                 raise Exception(
                     f"Param {param} can't be saved to "
@@ -190,17 +204,8 @@ class Dependency(SignatureParser):
             raise Exception("Annotated supported with 2 args only")
         self.parse_double_annotated_kwarg(param, *args)
 
-    async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
-        if isasyncgenfunction(self.func):
-            return await stack.enter_async_context(
-                asynccontextmanager(self.func)(**self.kwargs)
-            )
-        elif isgeneratorfunction(self.func):
-            return stack.enter_context(contextmanager(self.func)(**self.kwargs))
-        return await self.run(**self.kwargs)
 
-
-class Request(Dependency):
+class RequestSignature(DependencySignature):
     def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
         super().__init__(
             func=handler,
@@ -225,14 +230,14 @@ class Request(Dependency):
                 yield arg_type
 
     def resolve_dependencies(self) -> Iterator[Dependency]:
-        layer: list[Dependency]
+        layer: list[DependencySignature]
         while len(self.unresolved) != 0:  # TODO errors for cycles in DR
             layer = [
                 dependency
                 for dependency in self.context.func_to_dep.values()
                 if len(dependency.unresolved) == 0
             ]
-            yield from layer
+            yield from (dependency.the_dep for dependency in layer)
             for dependency in self.context.func_to_dep.values():
                 for resolved in layer:
                     dependency.unresolved.discard(resolved.func)
@@ -251,7 +256,7 @@ class Request(Dependency):
             ),
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
-            kwargs=self.kwargs,
+            the_dep=self.the_dep,
         )
 
 
@@ -263,14 +268,14 @@ class ClientEvent(Runnable):
         arg_model: type[BaseModel],
         arg_count: int,
         dependency_order: list[Dependency],
-        kwargs: Any,  # TODO move kwargs out of Request and Dependency
+        the_dep: Dependency,
     ):
         super().__init__(func)
         self.context = context
         self.arg_model = arg_model
         self.arg_count = arg_count
         self.dependency_order = dependency_order
-        self.kwargs = kwargs
+        self.the_dep = the_dep  # TODO naming
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
         converted = self.arg_model.model_validate(
@@ -282,8 +287,8 @@ class ClientEvent(Runnable):
                 yield arg_type.clean(result)
                 for field_name, destinations in arg_type.destinations.items():
                     value = getattr(result, field_name)
-                    for dependency in destinations:
-                        self.context.func_to_dep[dependency].kwargs[field_name] = value
+                    for the_dep in destinations:
+                        the_dep.kwargs[field_name] = value
             else:
                 yield arg_type
 
@@ -305,23 +310,20 @@ class ClientEvent(Runnable):
             (self, self.context.request_positions),
             (sid, self.context.sid_positions),
         ):
-            for func, field_name in destinations:
-                self.context.func_to_dep[func].kwargs[field_name] = value
+            for the_dep, field_name in destinations:
+                the_dep.kwargs[field_name] = value
 
         try:
             async with AsyncExitStack() as stack:
                 for dependency in self.dependency_order:
-                    if len(dependency.destinations) == 0:  # TODO redo
-                        continue
+                    # if len(dependency.destinations) == 0:  # TODO redo
                     value = await dependency.resolve(stack)
                     for destination, field_names in dependency.destinations.items():
                         for field_name in field_names:
-                            self.context.func_to_dep[destination].kwargs[
-                                field_name
-                            ] = value
+                            destination.kwargs[field_name] = value
 
                 # call the function
-                return await self.run(*args, **self.kwargs)
+                return await self.run(*args, **self.the_dep.kwargs)
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
@@ -346,7 +348,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         if handler is None:
             return None
 
-        request = Request(handler, ns=type(self))
+        request = RequestSignature(handler, ns=type(self))
         client_event = request.extract()
         result = await client_event.execute(event, *args)
         return None if result is None else result.model_dump()
