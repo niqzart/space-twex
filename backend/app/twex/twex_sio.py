@@ -282,15 +282,15 @@ class ClientEvent(Runnable):
             {str(i): ann for i, ann in enumerate(arguments)}
         )
         for i, arg_type in enumerate(self.context.arg_types):
+            result: Any = getattr(converted, str(i))
             if isinstance(arg_type, ExpandableArgument):
-                result: BaseModel = getattr(converted, str(i))
                 yield arg_type.clean(result)
                 for field_name, destinations in arg_type.destinations.items():
                     value = getattr(result, field_name)
                     for the_dep in destinations:
                         the_dep.kwargs[field_name] = value
             else:
-                yield arg_type
+                yield result
 
     async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
         # TODO use *actual* Request data-object
