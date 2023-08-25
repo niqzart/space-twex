@@ -89,17 +89,24 @@ class Dependency(Runnable):
         return await self.run()
 
 
+class CEContext(BaseModel, arbitrary_types_allowed=True):  # TODO naming
+    request_positions: list[tuple[Runnable, str]] = []
+    sid_positions: list[tuple[Runnable, str]] = []
+
+
 class ClientEvent:
     def __init__(
         self,
-        context: SPContext,
+        event_context: CEContext,
         arg_model: type[BaseModel],
+        arg_types: list[type | ExpandableArgument],
         arg_count: int,
         dependency_order: list[Dependency],
         destination: Runnable,
     ):
-        self.context = context
+        self.event_context = event_context
         self.arg_model = arg_model
+        self.arg_types = arg_types
         self.arg_count = arg_count
         self.dependency_order = dependency_order
         self.destination = destination
@@ -109,7 +116,7 @@ class ClientEvent:
         converted = self.arg_model.model_validate(
             {str(i): ann for i, ann in enumerate(arguments)}
         )
-        for i, arg_type in enumerate(self.context.arg_types):
+        for i, arg_type in enumerate(self.arg_types):
             result: Any = getattr(converted, str(i))
             if isinstance(arg_type, ExpandableArgument):
                 yield arg_type.clean(result)
@@ -135,8 +142,8 @@ class ClientEvent:
             return Ack(code=422, data=str(e))
 
         for value, destinations in (  # TODO more expandability
-            (self, self.context.request_positions),
-            (sid, self.context.sid_positions),
+            (self, self.event_context.request_positions),
+            (sid, self.event_context.sid_positions),
         ):
             for destination, field_name in destinations:
                 destination.kwargs[field_name] = value
@@ -161,8 +168,6 @@ class ClientEvent:
 class SPContext(BaseModel, arbitrary_types_allowed=True):
     arg_types: list[type | ExpandableArgument] = []
     first_expandable_argument: ExpandableArgument | None = None
-    request_positions: list[tuple[Runnable, str]] = []  # TODO move out
-    sid_positions: list[tuple[Runnable, str]] = []  # TODO move out
     signatures: dict[AnyCallable, SignatureParser] = {}
 
 
@@ -171,6 +176,7 @@ class SignatureParser:
         self,
         func: Callable[..., T | Awaitable[T]],
         context: SPContext,
+        event_context: CEContext,
         local_ns: LocalNS | None = None,
         destination: Runnable | None = None,
     ) -> None:
@@ -179,6 +185,7 @@ class SignatureParser:
         self.local_ns: LocalNS = local_ns or {}
         self.destination: Runnable = destination or Runnable(func)
         self.context: SPContext = context
+        self.event_context: CEContext = event_context
         self.unresolved: set[AnyCallable] = set()
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
@@ -186,7 +193,7 @@ class SignatureParser:
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, RequestSignature):
-            self.context.request_positions.append((self.destination, param.name))
+            self.event_context.request_positions.append((self.destination, param.name))
         elif self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
@@ -203,8 +210,9 @@ class SignatureParser:
             if dependency is None:
                 dependency = DependencySignature(
                     decoded.dependency,
-                    self.local_ns,
                     self.context,
+                    self.event_context,
+                    self.local_ns,
                 )
                 dependency.parse()
                 self.context.signatures[decoded.dependency] = dependency
@@ -217,7 +225,7 @@ class SignatureParser:
             )
             self.unresolved.add(decoded.dependency)
         elif isinstance(decoded, SessionID):
-            self.context.sid_positions.append((self.destination, param.name))
+            self.event_context.sid_positions.append((self.destination, param.name))
         elif isinstance(decoded, int):
             if len(self.context.arg_types) <= decoded:
                 raise Exception(
@@ -263,11 +271,14 @@ class DependencySignature(SignatureParser):
     def __init__(
         self,
         func: AnyCallable,
-        local_ns: dict[str, Any],
         context: SPContext,
+        event_context: CEContext,
+        local_ns: dict[str, Any],
     ) -> None:
         self.the_dep: Dependency = Dependency(func)  # TODO naming
-        super().__init__(func, context, local_ns, destination=self.the_dep)
+        super().__init__(
+            func, context, event_context, local_ns, destination=self.the_dep
+        )
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
@@ -278,6 +289,7 @@ class RequestSignature(SignatureParser):
         super().__init__(
             func=handler,
             context=SPContext(signatures={handler: self}),
+            event_context=CEContext(),
             local_ns=ns and ns.__dict__,  # type: ignore[arg-type]  # assume bool(type) is True
         )
 
@@ -317,7 +329,7 @@ class RequestSignature(SignatureParser):
     def extract(self) -> ClientEvent:
         self.parse()
         return ClientEvent(
-            context=self.context,
+            event_context=self.event_context,
             arg_model=create_model(  # type: ignore[call-overload]
                 "InputModel",  # TODO model name from event & namespace(?)
                 **{
@@ -325,6 +337,7 @@ class RequestSignature(SignatureParser):
                     for i, ann in enumerate(self.generate_positional_fields())
                 },
             ),
+            arg_types=self.context.arg_types,
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
             destination=self.destination,
