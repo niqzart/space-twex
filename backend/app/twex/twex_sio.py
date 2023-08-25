@@ -61,13 +61,14 @@ class ExpandableArgument:
 class Runnable:
     def __init__(self, func: Callable[..., T | Awaitable[T]]) -> None:
         self.func = func
+        self.args: tuple[Any, ...] = ()
         self.kwargs: dict[str, Any] = {}
 
-    async def run(self, *args: Any, **kwargs: Any) -> T:
+    async def run(self) -> T:
         if iscoroutinefunction(self.func):
-            return await self.func(*args, **kwargs)  # type: ignore[no-any-return]
+            return await self.func(*self.args, **self.kwargs)  # type: ignore[no-any-return]
         elif callable(self.func):
-            return self.func(*args, **kwargs)  # type: ignore[return-value]
+            return self.func(*self.args, **self.kwargs)  # type: ignore[return-value]
         raise Exception("Handler is not callable")
 
 
@@ -79,24 +80,24 @@ class Dependency(Runnable):
     async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
         if isasyncgenfunction(self.func):
             return await stack.enter_async_context(
-                asynccontextmanager(self.func)(**self.kwargs)
+                asynccontextmanager(self.func)(*self.args, **self.kwargs)
             )
         elif isgeneratorfunction(self.func):
-            return stack.enter_context(contextmanager(self.func)(**self.kwargs))
-        return await self.run(**self.kwargs)
+            return stack.enter_context(
+                contextmanager(self.func)(*self.args, **self.kwargs)
+            )
+        return await self.run()
 
 
-class ClientEvent(Runnable):
+class ClientEvent:
     def __init__(
         self,
-        func: Callable[..., T | Awaitable[T]],
         context: SPContext,
         arg_model: type[BaseModel],
         arg_count: int,
         dependency_order: list[Dependency],
         destination: Runnable,
     ):
-        super().__init__(func)
         self.context = context
         self.arg_model = arg_model
         self.arg_count = arg_count
@@ -104,6 +105,7 @@ class ClientEvent(Runnable):
         self.destination = destination
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
+        # TODO argument parser
         converted = self.arg_model.model_validate(
             {str(i): ann for i, ann in enumerate(arguments)}
         )
@@ -128,7 +130,7 @@ class ClientEvent(Runnable):
             )
 
         try:
-            args: list[Any] = list(self.parse_arguments(arguments))
+            self.destination.args = tuple(self.parse_arguments(arguments))
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
@@ -142,14 +144,13 @@ class ClientEvent(Runnable):
         try:
             async with AsyncExitStack() as stack:
                 for dependency in self.dependency_order:
-                    # if len(dependency.destinations) == 0:  # TODO redo
                     value = await dependency.resolve(stack)
                     for destination, field_names in dependency.destinations.items():
                         for field_name in field_names:
                             destination.kwargs[field_name] = value
 
                 # call the function
-                return await self.run(*args, **self.destination.kwargs)
+                return await self.destination.run()
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
@@ -157,70 +158,31 @@ class ClientEvent(Runnable):
             return e.ack
 
 
-class SignatureParser:
-    def __init__(
-        self, func: Callable[..., T | Awaitable[T]], local_ns: LocalNS | None = None
-    ) -> None:
-        self.func = func
-        self.signature: Signature = signature(func)
-        self.local_ns: LocalNS = local_ns or {}
-
-    @property
-    def destination(self) -> Runnable:
-        raise NotImplementedError
-
-    def parse_positional_only(self, param: Parameter, ann: Any) -> None:
-        pass
-
-    def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        pass
-
-    def parse_annotated_kwarg(self, param: Parameter, *args: Any) -> None:
-        pass
-
-    def parse(self) -> None:
-        for param in self.signature.parameters.values():
-            annotation: Any = param.annotation  # TODO type the annotation
-            if isinstance(annotation, str):
-                global_ns = getattr(self.func, "__globals__", {})
-                annotation = eval_type_lenient(annotation, global_ns, self.local_ns)
-
-            if param.kind == param.POSITIONAL_ONLY:
-                self.parse_positional_only(param, annotation)
-            elif isinstance(annotation, type):
-                self.parse_typed_kwarg(param, annotation)
-            elif get_origin(annotation) is Annotated:
-                self.parse_annotated_kwarg(param, *get_args(annotation))
-            else:
-                raise NotImplementedError  # TODO errors
-
-
 class SPContext(BaseModel, arbitrary_types_allowed=True):
     arg_types: list[type | ExpandableArgument] = []
     first_expandable_argument: ExpandableArgument | None = None
     request_positions: list[tuple[Runnable, str]] = []  # TODO move out
     sid_positions: list[tuple[Runnable, str]] = []  # TODO move out
-    func_to_dep: dict[AnyCallable, DependencySignature] = {}
+    signatures: dict[AnyCallable, SignatureParser] = {}
 
 
-class DependencySignature(SignatureParser):
+class SignatureParser:
     def __init__(
         self,
-        func: AnyCallable,
-        local_ns: dict[str, Any],
+        func: Callable[..., T | Awaitable[T]],
         context: SPContext,
+        local_ns: LocalNS | None = None,
+        destination: Runnable | None = None,
     ) -> None:
-        super().__init__(func, local_ns)
+        self.func = func
+        self.signature: Signature = signature(func)
+        self.local_ns: LocalNS = local_ns or {}
+        self.destination: Runnable = destination or Runnable(func)
         self.context: SPContext = context
         self.unresolved: set[AnyCallable] = set()
-        self.the_dep: Dependency = Dependency(func)  # TODO naming
-
-    @property
-    def destination(self) -> Runnable:
-        return self.the_dep
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
-        raise Exception("No positional args allowed for dependencies")  # TODO errors
+        raise NotImplementedError
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, RequestSignature):
@@ -237,7 +199,7 @@ class DependencySignature(SignatureParser):
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
-            dependency = self.context.func_to_dep.get(decoded.dependency)
+            dependency = self.context.signatures.get(decoded.dependency)
             if dependency is None:
                 dependency = DependencySignature(
                     decoded.dependency,
@@ -245,7 +207,11 @@ class DependencySignature(SignatureParser):
                     self.context,
                 )
                 dependency.parse()
-                self.context.func_to_dep[decoded.dependency] = dependency
+                self.context.signatures[decoded.dependency] = dependency
+            elif not isinstance(dependency, DependencySignature):
+                raise Exception(
+                    f"Can't add destination to {type(dependency)}"
+                )  # TODO errors
             dependency.the_dep.destinations.setdefault(self.destination, []).append(
                 param.name
             )
@@ -276,13 +242,43 @@ class DependencySignature(SignatureParser):
             raise Exception("Annotated supported with 2 args only")
         self.parse_double_annotated_kwarg(param, *args)
 
+    def parse(self) -> None:
+        for param in self.signature.parameters.values():
+            annotation: Any = param.annotation  # TODO type the annotation
+            if isinstance(annotation, str):
+                global_ns = getattr(self.func, "__globals__", {})
+                annotation = eval_type_lenient(annotation, global_ns, self.local_ns)
 
-class RequestSignature(DependencySignature):
+            if param.kind == param.POSITIONAL_ONLY:
+                self.parse_positional_only(param, annotation)
+            elif isinstance(annotation, type):
+                self.parse_typed_kwarg(param, annotation)
+            elif get_origin(annotation) is Annotated:
+                self.parse_annotated_kwarg(param, *get_args(annotation))
+            else:
+                raise NotImplementedError  # TODO errors
+
+
+class DependencySignature(SignatureParser):
+    def __init__(
+        self,
+        func: AnyCallable,
+        local_ns: dict[str, Any],
+        context: SPContext,
+    ) -> None:
+        self.the_dep: Dependency = Dependency(func)  # TODO naming
+        super().__init__(func, context, local_ns, destination=self.the_dep)
+
+    def parse_positional_only(self, param: Parameter, ann: Any) -> None:
+        raise Exception("No positional args allowed for dependencies")  # TODO errors
+
+
+class RequestSignature(SignatureParser):
     def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
         super().__init__(
             func=handler,
-            context=SPContext(func_to_dep={handler: self}),
-            local_ns={} if ns is None else dict(ns.__dict__),
+            context=SPContext(signatures={handler: self}),
+            local_ns=ns and ns.__dict__,  # type: ignore[arg-type]  # assume bool(type) is True
         )
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
@@ -302,22 +298,25 @@ class RequestSignature(DependencySignature):
                 yield arg_type
 
     def resolve_dependencies(self) -> Iterator[Dependency]:
-        layer: list[DependencySignature]
+        layer: list[SignatureParser]
         while len(self.unresolved) != 0:  # TODO errors for cycles in DR
             layer = [
                 dependency
-                for dependency in self.context.func_to_dep.values()
+                for dependency in self.context.signatures.values()
                 if len(dependency.unresolved) == 0
             ]
-            yield from (dependency.the_dep for dependency in layer)
-            for dependency in self.context.func_to_dep.values():
+            yield from (
+                dependency.the_dep
+                for dependency in layer
+                if isinstance(dependency, DependencySignature)
+            )
+            for signature in self.context.signatures.values():
                 for resolved in layer:
-                    dependency.unresolved.discard(resolved.func)
+                    signature.unresolved.discard(resolved.func)
 
     def extract(self) -> ClientEvent:
         self.parse()
         return ClientEvent(
-            func=self.func,
             context=self.context,
             arg_model=create_model(  # type: ignore[call-overload]
                 "InputModel",  # TODO model name from event & namespace(?)
@@ -328,7 +327,7 @@ class RequestSignature(DependencySignature):
             ),
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
-            destination=self.the_dep,
+            destination=self.destination,
         )
 
 
