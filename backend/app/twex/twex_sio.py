@@ -10,7 +10,7 @@ from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import Ack
 from app.twex.twex_db import Twex, TwexStatus
-from siox.markers import Depends, Sid
+from siox.markers import Depends, EventName, Sid
 from siox.parsers import RequestSignature
 from siox.types import RequestData
 
@@ -58,6 +58,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         args: SubscribeArgs,
         /,
         sid: Sid,
+        event_name: EventName,
         twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
     ) -> Ack:
         await twex.update_status(new_status=TwexStatus.FULL)
@@ -65,7 +66,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
 
         self.enter_room(sid=sid, room=f"{twex.file_id}-subscribers")
         await self.emit(
-            event="subscribe",
+            event=event_name,
             data={**args.model_dump(), "file_id": twex.file_id},
             room=f"{twex.file_id}-publishers",
             skip_sid=sid,
@@ -75,7 +76,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class SendArgs(FileIdArgs):
         chunk: bytes
 
-    async def on_send(self, args: SendArgs, /, sid: Sid) -> Ack:
+    async def on_send(self, args: SendArgs, /, sid: Sid, event_name: EventName) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
@@ -84,7 +85,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
 
         chunk_id: str = uuid4().hex
         await self.emit(
-            event="send",
+            event=event_name,
             data={"chunk_id": chunk_id, **args.model_dump()},
             room=f"{args.file_id}-subscribers",
             skip_sid=sid,
@@ -94,7 +95,13 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class ConfirmArgs(FileIdArgs):
         chunk_id: str
 
-    async def on_confirm(self, args: ConfirmArgs, /, sid: Sid) -> Ack:
+    async def on_confirm(
+        self,
+        args: ConfirmArgs,
+        /,
+        sid: Sid,
+        event_name: EventName,
+    ) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.SENT},
@@ -102,7 +109,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         )
 
         await self.emit(
-            event="confirm",
+            event=event_name,
             data={**args.model_dump()},
             room=f"{args.file_id}-publishers",
             skip_sid=sid,
@@ -112,7 +119,13 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class FinishArgs(FileIdArgs):
         pass
 
-    async def on_finish(self, args: FinishArgs, /, sid: Sid) -> Ack:
+    async def on_finish(
+        self,
+        args: FinishArgs,
+        /,
+        sid: Sid,
+        event_name: EventName,
+    ) -> Ack:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.CONFIRMED},
@@ -120,7 +133,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         )
 
         await self.emit(
-            event="finish",
+            event=event_name,
             data={**args.model_dump()},
             room=f"{args.file_id}-subscribers",
             skip_sid=sid,

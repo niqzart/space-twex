@@ -20,10 +20,16 @@ class RequestMarker(Marker[RequestData]):
         return request
 
 
+class EventNameMarker(Marker[str]):
+    def extract(self, request: RequestData) -> str:
+        return request.event_name
+
+
 class SessionIDMarker(Marker[str]):
     def extract(self, request: RequestData) -> str:
         return request.sid
 
 
 Sid = Annotated[str, SessionIDMarker()]
+EventName = Annotated[str, EventNameMarker()]
 Request = Annotated[RequestData, RequestMarker()]
