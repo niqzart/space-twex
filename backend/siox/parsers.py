@@ -9,12 +9,12 @@ from pydantic._internal._typing_extra import eval_type_lenient
 from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import Ack
-from siox.markers import Depends, SessionID
+from siox.markers import Depends, Marker
 from siox.results import (
-    CEContext,
     ClientEvent,
     Dependency,
     ExpandableArgument,
+    MarkerDestinations,
     Runnable,
 )
 from siox.types import AnyCallable, LocalNS
@@ -33,7 +33,7 @@ class SignatureParser:
         self,
         func: Callable[..., T | Awaitable[T]],
         context: SPContext,
-        event_context: CEContext,
+        marker_destinations: MarkerDestinations,
         local_ns: LocalNS | None = None,
         destination: Runnable | None = None,
     ) -> None:
@@ -42,16 +42,14 @@ class SignatureParser:
         self.local_ns: LocalNS = local_ns or {}
         self.destination: Runnable = destination or Runnable(func)
         self.context: SPContext = context
-        self.event_context: CEContext = event_context
+        self.marker_destinations = marker_destinations
         self.unresolved: set[AnyCallable] = set()
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise NotImplementedError
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        if issubclass(type_, RequestSignature):
-            self.event_context.request_positions.append((self.destination, param.name))
-        elif self.context.first_expandable_argument is None:
+        if self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
         else:
@@ -68,7 +66,7 @@ class SignatureParser:
                 dependency = DependencySignature(
                     decoded.dependency,
                     self.context,
-                    self.event_context,
+                    self.marker_destinations,
                     self.local_ns,
                 )
                 dependency.parse()
@@ -81,8 +79,10 @@ class SignatureParser:
                 param.name
             )
             self.unresolved.add(decoded.dependency)
-        elif isinstance(decoded, SessionID):
-            self.event_context.sid_positions.append((self.destination, param.name))
+        elif isinstance(decoded, Marker):
+            self.marker_destinations.add_destination(
+                decoded, self.destination, param.name
+            )
         elif isinstance(decoded, int):
             if len(self.context.arg_types) <= decoded:
                 raise Exception(
@@ -129,12 +129,12 @@ class DependencySignature(SignatureParser):
         self,
         func: AnyCallable,
         context: SPContext,
-        event_context: CEContext,
+        marker_destinations: MarkerDestinations,
         local_ns: dict[str, Any],
     ) -> None:
         self.the_dep: Dependency = Dependency(func)  # TODO naming
         super().__init__(
-            func, context, event_context, local_ns, destination=self.the_dep
+            func, context, marker_destinations, local_ns, destination=self.the_dep
         )
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
@@ -146,7 +146,7 @@ class RequestSignature(SignatureParser):
         super().__init__(
             func=handler,
             context=SPContext(signatures={handler: self}),
-            event_context=CEContext(),
+            marker_destinations=MarkerDestinations(),
             local_ns=ns and ns.__dict__,  # type: ignore[arg-type]  # assume bool(type) is True
         )
 
@@ -186,7 +186,7 @@ class RequestSignature(SignatureParser):
     def extract(self) -> ClientEvent:
         self.parse()
         return ClientEvent(
-            event_context=self.event_context,
+            marker_destinations=self.marker_destinations,
             arg_model=create_model(  # type: ignore[call-overload]
                 "InputModel",  # TODO model name from event & namespace(?)
                 **{

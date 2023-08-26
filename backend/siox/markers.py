@@ -1,10 +1,8 @@
-from typing import Annotated
+from typing import Annotated, Generic, TypeVar
 
-from siox.types import AnyCallable
+from siox.types import AnyCallable, RequestData
 
-
-class SessionID:
-    pass
+T = TypeVar("T")
 
 
 class Depends:
@@ -12,4 +10,20 @@ class Depends:
         self.dependency = dependency
 
 
-Sid = Annotated[str, SessionID()]
+class Marker(Generic[T]):
+    def extract(self, request: RequestData) -> T:
+        raise NotImplementedError
+
+
+class RequestMarker(Marker[RequestData]):
+    def extract(self, request: RequestData) -> RequestData:
+        return request
+
+
+class SessionIDMarker(Marker[str]):
+    def extract(self, request: RequestData) -> str:
+        return request.sid
+
+
+Sid = Annotated[str, SessionIDMarker()]
+Request = Annotated[RequestData, RequestMarker()]

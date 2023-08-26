@@ -14,6 +14,8 @@ from pydantic import BaseModel, ValidationError, create_model
 from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import AbortException, Ack
+from siox.markers import Marker
+from siox.types import RequestData
 
 T = TypeVar("T")
 
@@ -81,22 +83,37 @@ class Dependency(Runnable):
         return await self.run()
 
 
-class CEContext(BaseModel, arbitrary_types_allowed=True):  # TODO naming
-    request_positions: list[tuple[Runnable, str]] = []
-    sid_positions: list[tuple[Runnable, str]] = []
+class MarkerDestinations:
+    def __init__(self) -> None:
+        self.destinations: dict[Marker[Any], list[tuple[Runnable, str]]] = {}
+
+    def add_destination(
+        self,
+        marker: Marker[Any],
+        destination: Runnable,
+        field_name: str,
+    ) -> None:
+        destinations = self.destinations.setdefault(marker, [])
+        destinations.append((destination, field_name))
+
+    def fill_all(self, request: RequestData) -> None:
+        for marker, destinations in self.destinations.items():
+            value: Any = marker.extract(request)
+            for destination, field_name in destinations:
+                destination.kwargs[field_name] = value
 
 
 class ClientEvent:
     def __init__(
         self,
-        event_context: CEContext,
+        marker_destinations: MarkerDestinations,
         arg_model: type[BaseModel],
         arg_types: list[type | ExpandableArgument],
         arg_count: int,
         dependency_order: list[Dependency],
         destination: Runnable,
     ):
-        self.event_context = event_context
+        self.marker_destinations = marker_destinations
         self.arg_model = arg_model
         self.arg_types = arg_types
         self.arg_count = arg_count
@@ -119,25 +136,19 @@ class ClientEvent:
             else:
                 yield result
 
-    async def execute(self, event_name: str, sid: str, *arguments: Any) -> Ack | None:
-        # TODO use *actual* Request data-object
-        if len(arguments) != self.arg_count:
+    async def execute(self, request: RequestData) -> Ack | None:
+        if len(request.arguments) != self.arg_count:
             return Ack(
                 code=422,
-                data=f"Required {self.arg_count}, but {len(arguments)} given",
+                data=f"Required {self.arg_count}, but {len(request.arguments)} given",
             )
 
         try:
-            self.destination.args = tuple(self.parse_arguments(arguments))
+            self.destination.args = tuple(self.parse_arguments(request.arguments))
         except (ValidationError, AttributeError) as e:
             return Ack(code=422, data=str(e))
 
-        for value, destinations in (  # TODO more expandability
-            (self, self.event_context.request_positions),
-            (sid, self.event_context.sid_positions),
-        ):
-            for destination, field_name in destinations:
-                destination.kwargs[field_name] = value
+        self.marker_destinations.fill_all(request)
 
         try:
             async with AsyncExitStack() as stack:

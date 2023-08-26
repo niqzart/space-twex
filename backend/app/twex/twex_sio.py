@@ -12,6 +12,7 @@ from app.common.sockets import Ack
 from app.twex.twex_db import Twex, TwexStatus
 from siox.markers import Depends, Sid
 from siox.parsers import RequestSignature
+from siox.types import RequestData
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
@@ -30,7 +31,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
 
         request = RequestSignature(handler, ns=type(self))
         client_event = request.extract()
-        result = await client_event.execute(event, *args)
+        result = await client_event.execute(RequestData(event, *args))
         return None if result is None else result.model_dump()
 
     async def on_connect(self, sid: Sid) -> None:
