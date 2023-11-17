@@ -71,7 +71,7 @@ class Dependency(Runnable):
         super().__init__(func)
         self.destinations: dict[Runnable, list[str]] = {}
 
-    async def resolve(self, stack: AsyncExitStack) -> Any:  # TODO move out
+    async def resolve(self, stack: AsyncExitStack) -> Any:
         if isasyncgenfunction(self.func):
             return await stack.enter_async_context(
                 asynccontextmanager(self.func)(*self.args, **self.kwargs)
@@ -121,7 +121,6 @@ class ClientEvent:
         self.destination = destination
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
-        # TODO argument parser
         converted = self.arg_model.model_validate(
             {str(i): ann for i, ann in enumerate(arguments)}
         )

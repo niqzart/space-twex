@@ -1,5 +1,7 @@
 from typing import Annotated, Generic, TypeVar
 
+from socketio import AsyncNamespace  # type: ignore
+
 from siox.types import AnyCallable, RequestData
 
 T = TypeVar("T")
@@ -18,6 +20,11 @@ class Marker(Generic[T]):
 class RequestMarker(Marker[RequestData]):
     def extract(self, request: RequestData) -> RequestData:
         return request
+
+
+class NamespaceMarker(Marker[AsyncNamespace]):
+    def extract(self, request: RequestData) -> AsyncNamespace:
+        return request.namespace
 
 
 class EventNameMarker(Marker[str]):
