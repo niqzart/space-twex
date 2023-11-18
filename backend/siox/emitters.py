@@ -1,7 +1,9 @@
-from typing import Any, ClassVar
+from typing import Any, ClassVar, cast
 
 from pydantic import BaseModel
-from socketio import AsyncNamespace, AsyncServer  # type: ignore[import]
+
+from siox.socket import AsyncSocket
+from siox.types import CallbackProtocol, DataType
 
 
 class ServerEmitter:
@@ -9,34 +11,38 @@ class ServerEmitter:
 
     def __init__(
         self,
-        server: AsyncServer | AsyncNamespace,
+        socket: AsyncSocket,
         model: type[BaseModel],
         name: str,
-        sid: str,
     ) -> None:
-        self.server = server
+        self.socket = socket
         self.model = model
         self.name = name
-        self.sid = sid
 
-    def _convert_data(self, data: Any) -> Any:
-        return self.model.model_validate(data).model_dump()
+    def _convert_data(self, data: Any) -> DataType | tuple[DataType, ...]:
+        return cast(DataType, self.model.model_validate(data).model_dump())
 
     async def emit(
         self,
         data: Any,
-        target: str | None,
+        target: str | None = None,
+        skip_sid: str | None = None,
         exclude_self: bool | None = None,
-        **kwargs: Any,
+        namespace: str | None = None,
+        callback: CallbackProtocol | None = None,
+        ignore_queue: bool = False,
     ) -> None:
         if exclude_self is None:
             exclude_self = self.default_exclude_self
-        await self.server.emit(
+        await self.socket.emit(
             event=self.name,
             data=self._convert_data(data),
-            to=target,
-            skip_sid=kwargs.get("skip_sid") or self.sid if exclude_self else None,
-            **kwargs,
+            target=target,
+            skip_sid=skip_sid,
+            exclude_self=exclude_self,
+            namespace=namespace,
+            callback=callback,
+            ignore_queue=ignore_queue,
         )
 
 

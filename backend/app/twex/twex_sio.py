@@ -13,7 +13,8 @@ from app.twex.twex_db import Twex, TwexStatus
 from siox.emitters import DuplexEmitter
 from siox.markers import Depends, Sid
 from siox.parsers import RequestSignature
-from siox.types import RequestData
+from siox.request import RequestData
+from siox.socket import AsyncSocket
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
@@ -41,11 +42,11 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class CreateArgs(BaseModel):
         file_name: str
 
-    async def on_create(self, args: CreateArgs, /, sid: Sid) -> Ack:
+    async def on_create(self, args: CreateArgs, /, socket: AsyncSocket) -> Ack:
         twex = Twex(file_name=args.file_name)
         await twex.save()
 
-        self.enter_room(sid=sid, room=f"{twex.file_id}-publishers")
+        socket.enter_room(f"{twex.file_id}-publishers")
         return Ack(code=201, data={"file_id": twex.file_id})
 
     class FileIdArgs(BaseModel):
@@ -61,14 +62,14 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         self,
         args: SubscribeArgs,
         /,
-        sid: Sid,
+        socket: AsyncSocket,
         twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
         event: Annotated[DuplexEmitter, SubscribeResp],
     ) -> Ack:
         await twex.update_status(new_status=TwexStatus.FULL)
         # TODO more control over FULL for non-dialog twexes
 
-        self.enter_room(sid=sid, room=f"{twex.file_id}-subscribers")
+        socket.enter_room(f"{twex.file_id}-subscribers")
         await event.emit(
             data={**args.model_dump(), "file_id": twex.file_id},
             target=f"{twex.file_id}-publishers",

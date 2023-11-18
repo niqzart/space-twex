@@ -1,21 +1,12 @@
 from collections.abc import Callable
-from typing import Any
-
-from socketio import AsyncNamespace  # type: ignore
+from typing import Any, Protocol
 
 LocalNS = dict[str, Any]
 AnyCallable = Callable[..., Any]
 
+DataType = None | str | bytes | dict["DataType", "DataType"] | list["DataType"]
 
-class RequestData:
-    def __init__(
-        self,
-        namespace: AsyncNamespace,  # TODO make SOIX independent of this
-        event_name: str,
-        sid: str,
-        *arguments: Any,
-    ) -> None:
-        self.namespace = namespace
-        self.event_name = event_name
-        self.sid = sid
-        self.arguments = arguments
+
+class CallbackProtocol(Protocol):
+    def __call__(self, *args: DataType) -> None:
+        pass

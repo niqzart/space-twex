@@ -11,11 +11,10 @@ from inspect import (
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError, create_model
-from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import AbortException, Ack
 from siox.markers import Marker
-from siox.types import RequestData
+from siox.request import RequestData
 
 T = TypeVar("T")
 

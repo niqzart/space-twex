@@ -2,10 +2,11 @@ from dataclasses import dataclass
 from typing import Annotated, Generic, TypeVar
 
 from pydantic import BaseModel
-from socketio import AsyncNamespace  # type: ignore
 
 from siox.emitters import DuplexEmitter, ServerEmitter
-from siox.types import AnyCallable, RequestData
+from siox.request import RequestData
+from siox.socket import AsyncServer, AsyncSocket
+from siox.types import AnyCallable
 
 T = TypeVar("T")
 
@@ -25,11 +26,6 @@ class RequestMarker(Marker[RequestData]):
         return request
 
 
-class NamespaceMarker(Marker[AsyncNamespace]):
-    def extract(self, request: RequestData) -> AsyncNamespace:
-        return request.namespace
-
-
 class EventNameMarker(Marker[str]):
     def extract(self, request: RequestData) -> str:
         return request.event_name
@@ -46,7 +42,7 @@ class ServerEmitterMarker(Marker[ServerEmitter]):
     model: type[BaseModel]
 
     def extract(self, request: RequestData) -> ServerEmitter:
-        return ServerEmitter(request.namespace, self.model, self.name, request.sid)
+        return ServerEmitter(request.socket, self.model, self.name)
 
 
 @dataclass(frozen=True)
@@ -54,9 +50,17 @@ class DuplexEmitterMarker(Marker[DuplexEmitter]):
     model: type[BaseModel]
 
     def extract(self, request: RequestData) -> DuplexEmitter:
-        return DuplexEmitter(
-            request.namespace, self.model, request.event_name, request.sid
-        )
+        return DuplexEmitter(request.socket, self.model, request.event_name)
+
+
+class AsyncServerMarker(Marker[AsyncServer]):
+    def extract(self, request: RequestData) -> AsyncServer:
+        return request.socket.server
+
+
+class AsyncSocketMarker(Marker[AsyncSocket]):
+    def extract(self, request: RequestData) -> AsyncSocket:
+        return request.socket
 
 
 Sid = Annotated[str, SessionIDMarker()]

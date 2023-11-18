@@ -6,11 +6,17 @@ from typing import Annotated, Any, TypeVar, get_args, get_origin
 
 from pydantic import BaseModel, create_model
 from pydantic._internal._typing_extra import eval_type_lenient
-from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import Ack
 from siox.emitters import DuplexEmitter, ServerEmitter
-from siox.markers import Depends, DuplexEmitterMarker, Marker, ServerEmitterMarker
+from siox.markers import (
+    AsyncServerMarker,
+    AsyncSocketMarker,
+    Depends,
+    DuplexEmitterMarker,
+    Marker,
+    ServerEmitterMarker,
+)
 from siox.results import (
     ClientEvent,
     Dependency,
@@ -18,6 +24,7 @@ from siox.results import (
     MarkerDestinations,
     Runnable,
 )
+from siox.socket import AsyncServer, AsyncSocket
 from siox.types import AnyCallable, LocalNS
 
 T = TypeVar("T")
@@ -50,7 +57,15 @@ class SignatureParser:
         raise NotImplementedError
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        if self.context.first_expandable_argument is None:
+        if issubclass(type_, AsyncSocket):
+            self.marker_destinations.add_destination(
+                AsyncSocketMarker(), self.destination, param.name
+            )
+        elif issubclass(type_, AsyncServer):
+            self.marker_destinations.add_destination(
+                AsyncServerMarker(), self.destination, param.name
+            )
+        elif self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
         else:

@@ -1,13 +1,8 @@
-from typing import Any, AsyncContextManager, Literal, Protocol, cast
+from typing import Any, AsyncContextManager, Literal, cast
 
 import socketio  # type: ignore[import]
 
-DataType = None | str | bytes | dict["DataType", "DataType"] | list["DataType"]
-
-
-class CallbackProtocol(Protocol):
-    def __call__(self, *args: DataType) -> None:
-        pass
+from siox.types import CallbackProtocol, DataType
 
 
 class AsyncServer:
