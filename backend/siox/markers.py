@@ -1,7 +1,10 @@
+from dataclasses import dataclass
 from typing import Annotated, Generic, TypeVar
 
+from pydantic import BaseModel
 from socketio import AsyncNamespace  # type: ignore
 
+from siox.emitters import DuplexEmitter, ServerEmitter
 from siox.types import AnyCallable, RequestData
 
 T = TypeVar("T")
@@ -35,6 +38,25 @@ class EventNameMarker(Marker[str]):
 class SessionIDMarker(Marker[str]):
     def extract(self, request: RequestData) -> str:
         return request.sid
+
+
+@dataclass(frozen=True)
+class ServerEmitterMarker(Marker[ServerEmitter]):
+    name: str
+    model: type[BaseModel]
+
+    def extract(self, request: RequestData) -> ServerEmitter:
+        return ServerEmitter(request.namespace, self.model, self.name, request.sid)
+
+
+@dataclass(frozen=True)
+class DuplexEmitterMarker(Marker[DuplexEmitter]):
+    model: type[BaseModel]
+
+    def extract(self, request: RequestData) -> DuplexEmitter:
+        return DuplexEmitter(
+            request.namespace, self.model, request.event_name, request.sid
+        )
 
 
 Sid = Annotated[str, SessionIDMarker()]

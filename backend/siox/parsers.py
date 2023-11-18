@@ -9,7 +9,8 @@ from pydantic._internal._typing_extra import eval_type_lenient
 from socketio import AsyncNamespace  # type: ignore
 
 from app.common.sockets import Ack
-from siox.markers import Depends, Marker
+from siox.emitters import DuplexEmitter, ServerEmitter
+from siox.markers import Depends, DuplexEmitterMarker, Marker, ServerEmitterMarker
 from siox.results import (
     ClientEvent,
     Dependency,
@@ -103,9 +104,27 @@ class SignatureParser:
             raise NotImplementedError(f"Parameter {type_} {decoded} not supported")
 
     def parse_annotated_kwarg(self, param: Parameter, *args: Any) -> None:
-        if len(args) != 2:
-            raise Exception("Annotated supported with 2 args only")
-        self.parse_double_annotated_kwarg(param, *args)
+        if len(args) == 0 or not isinstance(args[0], type):
+            raise Exception("Incorrect Annotated, first arg must be a type")
+        if (
+            issubclass(args[0], DuplexEmitter)
+            and len(args) == 2
+            and isinstance(args[1], type)
+            and issubclass(args[1], BaseModel)
+        ):
+            args = args[0], DuplexEmitterMarker(args[1])
+        elif (
+            issubclass(args[0], ServerEmitter)
+            and len(args) == 3
+            and isinstance(args[1], type)
+            and issubclass(args[1], BaseModel)
+            and isinstance(args[2], str)
+        ):
+            args = args[0], ServerEmitterMarker(model=args[1], name=args[2])
+        if len(args) == 2:
+            self.parse_double_annotated_kwarg(param, *args)
+        else:
+            raise NotImplementedError(f"Parameter Annotated[{args}] not supported")
 
     def parse(self) -> None:
         for param in self.signature.parameters.values():
