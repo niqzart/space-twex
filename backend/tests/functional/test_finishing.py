@@ -17,7 +17,7 @@ async def test_successful_finish(
     await source_twex.update_status(TwexStatus.CONFIRMED)
 
     ack_finish = await roomed_sender.emit("finish", {"file_id": source_twex.file_id})
-    assert ack_finish.get("code") == 200
+    assert ack_finish.get("code") == 204
 
     event_finish = roomed_receiver.event_pop("finish")
     assert isinstance(event_finish, dict)

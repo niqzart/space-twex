@@ -8,7 +8,7 @@ from uuid import uuid4
 from pydantic import BaseModel
 from socketio import AsyncNamespace  # type: ignore
 
-from app.common.sockets import Ack
+from app.common.sockets import AckPacker, NoContentPacker
 from app.twex.twex_db import Twex, TwexStatus
 from siox.emitters import DuplexEmitter
 from siox.markers import Depends, Sid
@@ -45,21 +45,26 @@ class MainNamespace(AsyncNamespace):  # type: ignore
     class CreateArgs(BaseModel):
         file_name: str
 
-    async def on_create(self, args: CreateArgs, /, socket: AsyncSocket) -> Ack:
+    class FileIdArgs(BaseModel):
+        file_id: str
+
+    async def on_create(
+        self,
+        args: CreateArgs,
+        /,
+        socket: AsyncSocket,
+    ) -> Annotated[dict[str, Any], AckPacker(FileIdArgs, code=201)]:
         twex = Twex(file_name=args.file_name)
         await twex.save()
 
         socket.enter_room(f"{twex.file_id}-publishers")
-        return Ack(code=201, data={"file_id": twex.file_id})
-
-    class FileIdArgs(BaseModel):
-        file_id: str
+        return {"file_id": twex.file_id}
 
     class SubscribeArgs(BaseModel):
         pass
 
-    class SubscribeResp(FileIdArgs, SubscribeArgs):
-        pass
+    class SubscribeResp(FileIdArgs, SubscribeArgs, from_attributes=True):
+        file_name: str
 
     async def on_subscribe(
         self,
@@ -68,29 +73,32 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         socket: AsyncSocket,
         twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
         event: Annotated[DuplexEmitter, SubscribeResp],
-    ) -> Ack:
+    ) -> Annotated[Twex, AckPacker(SubscribeResp)]:
+        if args:
+            pass
+
         await twex.update_status(new_status=TwexStatus.FULL)
         # TODO more control over FULL for non-dialog twexes
 
         socket.enter_room(f"{twex.file_id}-subscribers")
-        await event.emit(
-            data={**args.model_dump(), "file_id": twex.file_id},
-            target=f"{twex.file_id}-publishers",
-        )
-        return Ack(code=200, data=twex)
+        await event.emit(data=twex, target=f"{twex.file_id}-publishers")
+        return twex
 
     class SendArgs(FileIdArgs):
         chunk: bytes
 
-    class SendResp(SendArgs):
+    class SendAck(BaseModel):
         chunk_id: str
+
+    class SendResp(SendArgs, SendAck):
+        pass
 
     async def on_send(
         self,
         args: SendArgs,
         /,
         event: Annotated[DuplexEmitter, SendResp],
-    ) -> Ack:
+    ) -> Annotated[dict[str, Any], AckPacker(SendAck)]:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
@@ -102,7 +110,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
             data={"chunk_id": chunk_id, **args.model_dump()},
             target=f"{args.file_id}-subscribers",
         )
-        return Ack(code=200, data={"chunk_id": chunk_id})
+        return {"chunk_id": chunk_id}
 
     class ConfirmArgs(FileIdArgs):
         chunk_id: str
@@ -112,14 +120,13 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         args: ConfirmArgs,
         /,
         event: Annotated[DuplexEmitter, ConfirmArgs],
-    ) -> Ack:
+    ) -> Annotated[None, NoContentPacker()]:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.SENT},
             new_status=TwexStatus.CONFIRMED,
         )
         await event.emit(data=args, target=f"{args.file_id}-publishers")
-        return Ack(code=200)
 
     class FinishArgs(FileIdArgs):
         pass
@@ -129,11 +136,10 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         args: FinishArgs,
         /,
         event: Annotated[DuplexEmitter, FinishArgs],
-    ) -> Ack:
+    ) -> Annotated[None, NoContentPacker()]:
         await Twex.transfer_status(
             file_id=args.file_id,
             statuses={TwexStatus.CONFIRMED},
             new_status=TwexStatus.FINISHED,
         )
         await event.emit(data=args, target=f"{args.file_id}-subscribers")
-        return Ack(code=200)

@@ -25,7 +25,7 @@ async def test_successful_confirm(
     ack_confirm = await roomed_receiver.emit(
         "confirm", {"file_id": source_twex.file_id, "chunk_id": chunk_id}
     )
-    assert ack_confirm.get("code") == 200
+    assert ack_confirm.get("code") == 204
 
     event_confirm = roomed_sender.event_pop("confirm")
     assert isinstance(event_confirm, dict)

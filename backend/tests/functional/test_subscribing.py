@@ -14,8 +14,7 @@ async def test_successful_subscribe(
 ) -> None:
     ack_subscribe = await receiver.emit("subscribe", {"file_id": source_twex.file_id})
     assert ack_subscribe.get("code") == 200
-    assert isinstance(ack_subscribe_data := ack_subscribe.get("data", None), dict)
-    assert ack_subscribe_data.get("file_name") == source_twex.file_name
+    assert ack_subscribe.get("file_name") == source_twex.file_name
 
     event_subscribe = roomed_sender.event_pop("subscribe")
     assert isinstance(event_subscribe, dict)

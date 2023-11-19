@@ -12,8 +12,7 @@ async def test_successful_create(
 ) -> None:
     ack_create = await sender.emit("create", {"file_name": file_name})
     assert ack_create.get("code") == 201
-    assert isinstance(ack_create_data := ack_create.get("data"), dict)
-    assert isinstance(file_id := ack_create_data.get("file_id"), str)
+    assert isinstance(file_id := ack_create.get("file_id"), str)
 
     twex = await Twex.find_one(file_id)
     assert twex.file_id == file_id

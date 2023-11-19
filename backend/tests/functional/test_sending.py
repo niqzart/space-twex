@@ -21,8 +21,7 @@ async def test_successful_send(
         "send", {"file_id": source_twex.file_id, "chunk": chunk}
     )
     assert ack_send.get("code") == 200
-    assert isinstance(ack_send_data := ack_send.get("data", None), dict)
-    assert (chunk_id := ack_send_data.get("chunk_id")) is not None
+    assert (chunk_id := ack_send.get("chunk_id")) is not None
 
     event_send = roomed_receiver.event_pop("send")
     assert isinstance(event_send, dict)
