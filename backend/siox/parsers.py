@@ -119,24 +119,28 @@ class SignatureParser:
         else:
             raise NotImplementedError(f"Parameter {type_} {decoded} not supported")
 
+    def parse_packaged(self, arg: Any) -> Packager | None:
+        if isinstance(arg, Packager):
+            return arg
+        if isinstance(arg, type) and issubclass(arg, BaseModel):
+            return PydanticPackager(arg)
+        return None
+
     def parse_annotated_kwarg(self, param: Parameter, *args: Any) -> None:
         if len(args) == 0 or not isinstance(args[0], type):
             raise Exception("Incorrect Annotated, first arg must be a type")
-        if (
-            issubclass(args[0], DuplexEmitter)
-            and len(args) == 2
-            and isinstance(args[1], type)
-            and issubclass(args[1], BaseModel)
-        ):
-            args = args[0], DuplexEmitterMarker(args[1])
+        if issubclass(args[0], DuplexEmitter) and len(args) == 2:
+            packager = self.parse_packaged(args[1])
+            if packager is not None:
+                args = args[0], DuplexEmitterMarker(packager=packager)
         elif (
             issubclass(args[0], ServerEmitter)
             and len(args) == 3
-            and isinstance(args[1], type)
-            and issubclass(args[1], BaseModel)
             and isinstance(args[2], str)
         ):
-            args = args[0], ServerEmitterMarker(model=args[1], name=args[2])
+            packager = self.parse_packaged(args[1])
+            if packager is not None:
+                args = args[0], ServerEmitterMarker(packager=packager, name=args[2])
         if len(args) == 2:
             self.parse_double_annotated_kwarg(param, *args)
         else:
@@ -228,11 +232,8 @@ class RequestSignature(SignatureParser):
 
         if get_origin(annotation) is Annotated:
             args = get_args(annotation)
-            if len(args) == 2 and isinstance(args[0], type):
-                if isinstance(args[1], type) and issubclass(args[1], BaseModel):
-                    self.result_packager = PydanticPackager(args[1])
-                elif isinstance(args[1], Packager):
-                    self.result_packager = args[1]
+            if len(args) == 2:
+                self.result_packager = self.parse_packaged(args[1])
 
     def extract(self) -> ClientEvent:
         self.parse()
