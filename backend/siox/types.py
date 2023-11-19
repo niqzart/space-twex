@@ -5,6 +5,7 @@ LocalNS = dict[str, Any]
 AnyCallable = Callable[..., Any]
 
 DataType = None | str | bytes | dict["DataType", "DataType"] | list["DataType"]
+DataOrTuple = DataType | tuple[DataType, ...]
 
 
 class CallbackProtocol(Protocol):

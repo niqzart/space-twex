@@ -2,7 +2,7 @@ from typing import Any, AsyncContextManager, Literal, cast
 
 import socketio  # type: ignore[import]
 
-from siox.types import CallbackProtocol, DataType
+from siox.types import CallbackProtocol, DataOrTuple, DataType
 
 
 class AsyncServer:
@@ -12,7 +12,7 @@ class AsyncServer:
     async def emit(
         self,
         event: str,
-        data: DataType | tuple[DataType, ...],
+        data: DataOrTuple,
         target: str | None = None,
         skip_sid: str | None = None,
         namespace: str | None = None,
@@ -31,7 +31,7 @@ class AsyncServer:
 
     async def send(
         self,
-        data: DataType | tuple[DataType, ...],
+        data: DataOrTuple,
         target: str | None = None,
         skip_sid: str | None = None,
         namespace: str | None = None,
@@ -50,14 +50,14 @@ class AsyncServer:
     async def call(
         self,
         event: str,
-        data: DataType | tuple[DataType, ...],
+        data: DataOrTuple,
         sid: str,
         namespace: str | None = None,
         timeout: int = 60,
         ignore_queue: bool = False,
-    ) -> DataType | tuple[DataType, ...]:
+    ) -> DataOrTuple:
         return cast(
-            DataType | tuple[DataType, ...],
+            DataOrTuple,
             await self.backend.call(
                 event=event,
                 data=data,
@@ -157,7 +157,7 @@ class AsyncSocket:
 
     async def send(
         self,
-        data: DataType | tuple[DataType, ...],
+        data: DataOrTuple,
         target: str | None = None,
         skip_sid: str | None = None,
         exclude_self: bool | None = None,
@@ -181,7 +181,7 @@ class AsyncSocket:
         namespace: str | None = None,
         timeout: int = 60,
         ignore_queue: bool = False,
-    ) -> DataType | tuple[DataType, ...]:
+    ) -> DataOrTuple:
         return await self.server.call(
             event=event,
             data=data,

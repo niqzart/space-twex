@@ -3,7 +3,7 @@ from typing import Any, ClassVar, cast
 from pydantic import BaseModel
 
 from siox.socket import AsyncSocket
-from siox.types import CallbackProtocol, DataType
+from siox.types import CallbackProtocol, DataOrTuple, DataType
 
 
 class ServerEmitter:
@@ -19,7 +19,7 @@ class ServerEmitter:
         self.model = model
         self.name = name
 
-    def _convert_data(self, data: Any) -> DataType | tuple[DataType, ...]:
+    def _convert_data(self, data: Any) -> DataOrTuple:
         return cast(DataType, self.model.model_validate(data).model_dump())
 
     async def emit(
