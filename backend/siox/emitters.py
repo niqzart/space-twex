@@ -12,7 +12,7 @@ class ServerEmitter:
     def __init__(
         self,
         socket: AsyncSocket,
-        model: type[BaseModel],
+        model: type[BaseModel],  # TODO replace with packager
         name: str,
     ) -> None:
         self.socket = socket

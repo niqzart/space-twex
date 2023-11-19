@@ -17,6 +17,7 @@ from siox.markers import (
     Marker,
     ServerEmitterMarker,
 )
+from siox.packager import NoopPackager, Packager, PydanticPackager
 from siox.results import (
     ClientEvent,
     Dependency,
@@ -183,6 +184,7 @@ class RequestSignature(SignatureParser):
             marker_destinations=MarkerDestinations(),
             local_ns=ns and ns.__dict__,  # type: ignore[arg-type]  # assume bool(type) is True
         )
+        self.result_packager: Packager | None = None
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         if issubclass(ann, BaseModel):
@@ -217,6 +219,21 @@ class RequestSignature(SignatureParser):
                 for resolved in layer:
                     signature.unresolved.discard(resolved.func)
 
+    def parse(self) -> None:
+        super().parse()
+        annotation: Any = self.signature.return_annotation  # TODO type the annotation
+        if isinstance(annotation, str):
+            global_ns = getattr(self.func, "__globals__", {})
+            annotation = eval_type_lenient(annotation, global_ns, self.local_ns)
+
+        if get_origin(annotation) is Annotated:
+            args = get_args(annotation)
+            if len(args) == 2 and isinstance(args[0], type):
+                if isinstance(args[1], type) and issubclass(args[1], BaseModel):
+                    self.result_packager = PydanticPackager(args[1])
+                elif isinstance(args[1], Packager):
+                    self.result_packager = args[1]
+
     def extract(self) -> ClientEvent:
         self.parse()
         return ClientEvent(
@@ -232,4 +249,5 @@ class RequestSignature(SignatureParser):
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
             destination=self.destination,
+            result_packager=self.result_packager or NoopPackager(),
         )

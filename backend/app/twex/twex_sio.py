@@ -15,6 +15,7 @@ from siox.markers import Depends, Sid
 from siox.parsers import RequestSignature
 from siox.request import RequestData
 from siox.socket import AsyncSocket
+from siox.types import DataOrTuple
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
@@ -25,7 +26,7 @@ def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]
 
 
 class MainNamespace(AsyncNamespace):  # type: ignore
-    async def trigger_event(self, event: str, *args: Any) -> dict[str, Any] | None:
+    async def trigger_event(self, event: str, *args: Any) -> DataOrTuple:
         handler_name = f"on_{event}"
         handler = getattr(self, handler_name, None)
         if handler is None:
@@ -34,7 +35,9 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         request = RequestSignature(handler, ns=type(self))
         client_event = request.extract()
         result = await client_event.execute(RequestData(self, event, *args))
-        return None if result is None else result.model_dump()
+        if isinstance(result, BaseModel):
+            return result.model_dump()
+        return result
 
     async def on_connect(self, sid: Sid) -> None:
         logging.warning(f"Connected to {sid}")

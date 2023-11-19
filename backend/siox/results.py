@@ -8,13 +8,15 @@ from inspect import (
     iscoroutinefunction,
     isgeneratorfunction,
 )
-from typing import Any, TypeVar
+from typing import Any, TypeVar, cast
 
 from pydantic import BaseModel, ValidationError, create_model
 
 from app.common.sockets import AbortException, Ack
 from siox.markers import Marker
+from siox.packager import Packager
 from siox.request import RequestData
+from siox.types import DataOrTuple
 
 T = TypeVar("T")
 
@@ -111,6 +113,7 @@ class ClientEvent:
         arg_count: int,
         dependency_order: list[Dependency],
         destination: Runnable,
+        result_packager: Packager,
     ):
         self.marker_destinations = marker_destinations
         self.arg_model = arg_model
@@ -118,6 +121,7 @@ class ClientEvent:
         self.arg_count = arg_count
         self.dependency_order = dependency_order
         self.destination = destination
+        self.result_packager = result_packager
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
         converted = self.arg_model.model_validate(
@@ -134,17 +138,21 @@ class ClientEvent:
             else:
                 yield result
 
-    async def execute(self, request: RequestData) -> Ack | None:
+    async def execute(self, request: RequestData) -> DataOrTuple:
         if len(request.arguments) != self.arg_count:
-            return Ack(
-                code=422,
-                data=f"Required {self.arg_count}, but {len(request.arguments)} given",
+            return cast(
+                DataOrTuple,
+                Ack(
+                    code=422,
+                    data=f"Required {self.arg_count}, "
+                    f"but {len(request.arguments)} given",
+                ).model_dump(),
             )
 
         try:
             self.destination.args = tuple(self.parse_arguments(request.arguments))
         except (ValidationError, AttributeError) as e:
-            return Ack(code=422, data=str(e))
+            return cast(DataOrTuple, Ack(code=422, data=str(e)).model_dump())
 
         self.marker_destinations.fill_all(request)
 
@@ -157,9 +165,9 @@ class ClientEvent:
                             destination.kwargs[field_name] = value
 
                 # call the function
-                return await self.destination.run()
+                return self.result_packager.pack(await self.destination.run())
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
         except AbortException as e:
-            return e.ack
+            return cast(DataOrTuple, e.ack.model_dump())
