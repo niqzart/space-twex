@@ -1,6 +1,6 @@
 from typing import Any, ClassVar
 
-from siox.packager import Packager
+from siox.packagers import Packager
 from siox.socket import AsyncSocket
 from siox.types import CallbackProtocol
 

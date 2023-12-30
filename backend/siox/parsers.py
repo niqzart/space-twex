@@ -17,7 +17,7 @@ from siox.markers import (
     Marker,
     ServerEmitterMarker,
 )
-from siox.packager import NoopPackager, Packager, PydanticPackager
+from siox.packagers import NoopPackager, Packager, PydanticPackager
 from siox.results import (
     ClientEvent,
     Dependency,

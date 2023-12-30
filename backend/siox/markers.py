@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Annotated, Generic, TypeVar
 
 from siox.emitters import DuplexEmitter, ServerEmitter
-from siox.packager import Packager
+from siox.packagers import Packager
 from siox.request import RequestData
 from siox.socket import AsyncServer, AsyncSocket
 from siox.types import AnyCallable

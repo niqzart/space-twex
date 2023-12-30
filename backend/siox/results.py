@@ -14,7 +14,7 @@ from pydantic import BaseModel, ValidationError, create_model
 
 from app.common.sockets import AbortException, Ack
 from siox.markers import Marker
-from siox.packager import Packager
+from siox.packagers import Packager
 from siox.request import RequestData
 from siox.types import DataOrTuple
 
