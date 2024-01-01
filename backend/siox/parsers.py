@@ -7,7 +7,6 @@ from typing import Annotated, Any, TypeVar, get_args, get_origin
 from pydantic import BaseModel, create_model
 from pydantic._internal._typing_extra import eval_type_lenient
 
-from app.common.sockets import Ack
 from siox.emitters import DuplexEmitter, ServerEmitter
 from siox.markers import (
     AsyncServerMarker,
@@ -17,7 +16,7 @@ from siox.markers import (
     Marker,
     ServerEmitterMarker,
 )
-from siox.packagers import NoopPackager, Packager, PydanticPackager
+from siox.packagers import DictErrorPackager, NoopPackager, Packager, PydanticPackager
 from siox.results import (
     ClientHandler,
     Dependency,
@@ -181,7 +180,7 @@ class DependencySignature(SignatureParser):
 
 
 class RequestSignature(SignatureParser):
-    def __init__(self, handler: Callable[..., Ack], ns: type | None = None):
+    def __init__(self, handler: Callable[..., Any], ns: type | None = None):
         super().__init__(
             func=handler,
             context=SPContext(signatures={handler: self}),
@@ -251,4 +250,5 @@ class RequestSignature(SignatureParser):
             dependency_order=list(self.resolve_dependencies()),
             destination=self.destination,
             result_packager=self.result_packager or NoopPackager(),
+            error_packager=DictErrorPackager(),
         )

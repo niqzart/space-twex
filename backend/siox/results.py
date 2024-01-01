@@ -8,13 +8,13 @@ from inspect import (
     iscoroutinefunction,
     isgeneratorfunction,
 )
-from typing import Any, TypeVar, cast
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError, create_model
 
-from app.common.sockets import AbortException, Ack
+from siox.exceptions import EventException
 from siox.markers import Marker
-from siox.packagers import Packager
+from siox.packagers import ErrorPackager, Packager
 from siox.request import RequestData
 from siox.types import DataOrTuple
 
@@ -114,6 +114,7 @@ class ClientHandler:
         dependency_order: list[Dependency],
         destination: Runnable,
         result_packager: Packager,
+        error_packager: ErrorPackager,
     ):
         self.marker_destinations = marker_destinations
         self.arg_model = arg_model
@@ -122,6 +123,7 @@ class ClientHandler:
         self.dependency_order = dependency_order
         self.destination = destination
         self.result_packager = result_packager
+        self.error_packager = error_packager
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
         converted = self.arg_model.model_validate(
@@ -140,19 +142,18 @@ class ClientHandler:
 
     async def handle(self, request: RequestData) -> DataOrTuple:
         if len(request.arguments) != self.arg_count:
-            return cast(
-                DataOrTuple,
-                Ack(
-                    code=422,
-                    data=f"Required {self.arg_count}, "
-                    f"but {len(request.arguments)} given",
-                ).model_dump(),
+            return self.error_packager.pack_error(
+                EventException(
+                    422,
+                    f"Event requires exactly {self.arg_count} arguments, "
+                    f"but {len(request.arguments)} arguments were received",
+                )
             )
 
         try:
             self.destination.args = tuple(self.parse_arguments(request.arguments))
         except (ValidationError, AttributeError) as e:
-            return cast(DataOrTuple, Ack(code=422, data=str(e)).model_dump())
+            return self.error_packager.pack_error(EventException(422, str(e)))
 
         self.marker_destinations.fill_all(request)
 
@@ -169,5 +170,5 @@ class ClientHandler:
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
-        except AbortException as e:
-            return cast(DataOrTuple, e.ack.model_dump())
+        except EventException as e:
+            return self.error_packager.pack_error(e)

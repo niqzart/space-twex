@@ -2,6 +2,7 @@ from typing import Any, cast
 
 from pydantic import BaseModel
 
+from siox.exceptions import EventException
 from siox.types import DataOrTuple
 
 
@@ -29,3 +30,17 @@ class PydanticPackager(CastedPackager):
 
     def pack_to_any(self, data: Any) -> Any:
         return self.model.model_validate(data).model_dump(mode="json")
+
+
+class ErrorPackager(Packager):
+    def pack_error(self, exception: EventException) -> DataOrTuple:
+        raise NotImplementedError
+
+
+class DictErrorPackager(ErrorPackager):
+    def pack_error(self, exception: EventException) -> DataOrTuple:
+        return {
+            "code": exception.code,
+            "reason": exception.reason,
+            "detail": exception.detail,
+        }
