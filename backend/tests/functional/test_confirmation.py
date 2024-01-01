@@ -18,7 +18,7 @@ async def test_successful_confirm(
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
     chunk_id: str,
-    chunk: bytes,
+    chunk: str,
 ) -> None:
     await source_twex.update_status(TwexStatus.SENT)
 

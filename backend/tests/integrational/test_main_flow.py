@@ -1,3 +1,5 @@
+from base64 import b64encode
+
 import pytest
 from faker import Faker
 
@@ -11,8 +13,8 @@ async def test_main_flow(
     file_name: str,
     faker: Faker,
 ) -> None:
-    chunk_1: bytes = faker.binary(length=24)
-    chunk_2: bytes = faker.binary(length=24)
+    chunk_1: str = b64encode(faker.binary(length=24)).decode("utf-8")
+    chunk_2: str = b64encode(faker.binary(length=24)).decode("utf-8")
 
     # producer creates the file
     ack_create = await sender.emit("create", {"file_name": file_name})

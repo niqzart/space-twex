@@ -1,3 +1,5 @@
+from base64 import b64encode
+
 import pytest
 from faker import Faker
 
@@ -32,5 +34,5 @@ async def roomed_receiver(
 
 
 @pytest.fixture()
-async def chunk(faker: Faker) -> bytes:
-    return faker.binary(length=24)  # type: ignore
+async def chunk(faker: Faker) -> str:
+    return b64encode(faker.binary(length=24)).decode("utf-8")

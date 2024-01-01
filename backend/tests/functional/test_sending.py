@@ -12,7 +12,7 @@ async def test_successful_send(
     roomed_sender: AsyncSIOTestClient,
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
-    chunk: bytes,
+    chunk: str,
     stating_status: TwexStatus,
 ) -> None:
     await source_twex.update_status(stating_status)
@@ -78,7 +78,7 @@ async def test_wrong_status_send(
     roomed_sender: AsyncSIOTestClient,
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
-    chunk: bytes,
+    chunk: str,
     status: TwexStatus,
 ) -> None:
     await source_twex.update_status(status)

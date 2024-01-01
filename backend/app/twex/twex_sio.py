@@ -85,7 +85,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         return twex
 
     class SendArgs(FileIdArgs):
-        chunk: bytes
+        chunk: str
 
     class SendAck(BaseModel):
         chunk_id: str
