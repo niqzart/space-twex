@@ -74,7 +74,7 @@ async def test_wrong_status_subscribe(
 
     ack_subscribe = await receiver.emit("subscribe", {"file_id": source_twex.file_id})
     assert ack_subscribe.get("code") == 400
-    assert ack_subscribe.get("data") == f"Wrong status: {status.value}"
+    assert ack_subscribe.get("reason") == f"Wrong status: {status.value}"
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex

@@ -5,7 +5,7 @@ from uuid import uuid4
 from pydantic import BaseModel, Field, ValidationError
 
 from app.common.config import db
-from app.common.sockets import AbortException, Ack
+from siox.exceptions import EventException
 
 
 class TwexStatus(str, Enum):
@@ -27,15 +27,13 @@ class Twex(BaseModel):
         try:
             return cls(**data, file_id=file_id)
         except ValidationError:
-            raise AbortException(Ack(code=404))
+            raise EventException(code=404, reason="Not found")
 
     @classmethod
     async def find_with_status(cls, file_id: str, statuses: set[TwexStatus]) -> Self:
         twex: Self = await cls.find_one(file_id)
         if twex.status not in statuses:
-            raise AbortException(
-                Ack(code=400, data=f"Wrong status: {twex.status.value}")
-            )
+            raise EventException(code=400, reason=f"Wrong status: {twex.status.value}")
         return twex
 
     async def update_status(self, new_status: TwexStatus) -> None:
@@ -50,9 +48,9 @@ class Twex(BaseModel):
     ) -> None:
         twex_status = await db.hget(name=file_id, key="status")
         if twex_status is None:
-            raise AbortException(Ack(code=404))
+            raise EventException(code=404, reason="Not found")
         if twex_status not in statuses:
-            raise AbortException(Ack(code=400, data=f"Wrong status: {twex_status}"))
+            raise EventException(code=400, reason=f"Wrong status: {twex_status}")
 
         if new_status is TwexStatus.FINISHED:
             await db.delete(file_id)

@@ -2,8 +2,8 @@ from typing import Any
 
 import pytest
 
-from app.common.sockets import AbortException
 from app.twex.twex_db import Twex, TwexStatus
+from siox.exceptions import EventException
 from tests.testing import AsyncSIOTestClient
 
 
@@ -23,7 +23,7 @@ async def test_successful_finish(
     assert isinstance(event_finish, dict)
     assert event_finish.get("file_id") == source_twex.file_id
 
-    with pytest.raises(AbortException):
+    with pytest.raises(EventException):
         await Twex.find_one(source_twex.file_id)
 
     assert roomed_sender.event_count() == 0
@@ -75,7 +75,7 @@ async def test_wrong_status_finish(
 
     ack_send = await roomed_sender.emit("finish", {"file_id": source_twex.file_id})
     assert ack_send.get("code") == 400
-    assert ack_send.get("data") == f"Wrong status: {status.value}"
+    assert ack_send.get("reason") == f"Wrong status: {status.value}"
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex

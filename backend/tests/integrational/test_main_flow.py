@@ -24,7 +24,7 @@ async def test_main_flow(
     # producer fails to send to no clients
     ack_send_early = await sender.emit("send", {"file_id": file_id, "chunk": chunk_1})
     assert ack_send_early.get("code") == 400
-    assert ack_send_early.get("data") == "Wrong status: open"
+    assert ack_send_early.get("reason") == "Wrong status: open"
 
     assert sender.event_count() == 0
     assert receiver.event_count() == 0
@@ -52,7 +52,7 @@ async def test_main_flow(
     # producer fails to send before confirmation
     ack_send_early = await sender.emit("send", {"file_id": file_id, "chunk": chunk_2})
     assert ack_send_early.get("code") == 400
-    assert ack_send_early.get("data") == "Wrong status: sent"
+    assert ack_send_early.get("reason") == "Wrong status: sent"
 
     assert sender.event_count() == 0
     assert receiver.event_count() == 0
@@ -82,7 +82,7 @@ async def test_main_flow(
     # producer fails to close the file before confirmation
     ack_finish = await sender.emit("finish", {"file_id": file_id})
     assert ack_finish.get("code") == 400
-    assert ack_finish.get("data") == "Wrong status: sent"
+    assert ack_finish.get("reason") == "Wrong status: sent"
 
     assert sender.event_count() == 0
     assert receiver.event_count() == 0

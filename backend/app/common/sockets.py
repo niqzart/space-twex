@@ -8,16 +8,6 @@ from siox.packagers import Packager, PydanticPackager
 from siox.types import DataOrTuple
 
 
-class Ack(BaseModel):
-    code: int
-    data: Any | None = None
-
-
-class AbortException(Exception):
-    def __init__(self, ack: Ack) -> None:
-        self.ack: Ack = ack
-
-
 class AckPacker(PydanticPackager):
     def __init__(self, model: type[BaseModel], code: int = 200):
         super().__init__(model)
