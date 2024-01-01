@@ -104,7 +104,7 @@ class MarkerDestinations:
                 destination.kwargs[field_name] = value
 
 
-class ClientEvent:
+class ClientHandler:
     def __init__(
         self,
         marker_destinations: MarkerDestinations,
@@ -138,7 +138,7 @@ class ClientEvent:
             else:
                 yield result
 
-    async def execute(self, request: RequestData) -> DataOrTuple:
+    async def handle(self, request: RequestData) -> DataOrTuple:
         if len(request.arguments) != self.arg_count:
             return cast(
                 DataOrTuple,

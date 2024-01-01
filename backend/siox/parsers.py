@@ -19,7 +19,7 @@ from siox.markers import (
 )
 from siox.packagers import NoopPackager, Packager, PydanticPackager
 from siox.results import (
-    ClientEvent,
+    ClientHandler,
     Dependency,
     ExpandableArgument,
     MarkerDestinations,
@@ -235,9 +235,9 @@ class RequestSignature(SignatureParser):
             if len(args) == 2:
                 self.result_packager = self.parse_packaged(args[1])
 
-    def extract(self) -> ClientEvent:
+    def extract(self) -> ClientHandler:
         self.parse()
-        return ClientEvent(
+        return ClientHandler(
             marker_destinations=self.marker_destinations,
             arg_model=create_model(  # type: ignore[call-overload]
                 "InputModel",  # TODO model name from event & namespace(?)

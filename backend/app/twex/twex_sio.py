@@ -34,7 +34,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
 
         request = RequestSignature(handler, ns=type(self))
         client_event = request.extract()
-        result = await client_event.execute(RequestData(self, event, *args))
+        result = await client_event.handle(RequestData(self, event, *args))
         if isinstance(result, BaseModel):
             return result.model_dump()
         return result
