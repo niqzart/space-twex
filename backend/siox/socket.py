@@ -1,12 +1,10 @@
 from typing import Any, AsyncContextManager, Literal, cast
 
-import socketio  # type: ignore[import]
-
-from siox.types import CallbackProtocol, DataOrTuple, DataType
+from siox.types import CallbackProtocol, DataOrTuple, DataType, SocketIOBackend
 
 
 class AsyncServer:
-    def __init__(self, backend: socketio.AsyncServer | socketio.AsyncNamespace) -> None:
+    def __init__(self, backend: SocketIOBackend) -> None:
         self.backend = backend
 
     async def emit(
@@ -125,11 +123,7 @@ class AsyncServer:
 
 
 class AsyncSocket:
-    def __init__(
-        self,
-        backend: socketio.AsyncServer | socketio.AsyncNamespace,
-        sid: str,
-    ) -> None:
+    def __init__(self, backend: SocketIOBackend, sid: str) -> None:
         self.server = AsyncServer(backend)
         self.backend = backend
         self.sid = sid
