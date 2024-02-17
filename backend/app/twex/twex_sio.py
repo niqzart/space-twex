@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -11,9 +11,8 @@ from socketio import AsyncNamespace  # type: ignore
 from app.common.sockets import AckPacker, NoContentPacker
 from app.twex.twex_db import Twex, TwexStatus
 from siox.emitters import DuplexEmitter
-from siox.markers import Depends, Sid
+from siox.markers import Depends, Sid, Socket
 from siox.routing import EventRouter
-from siox.socket import AsyncSocket
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
@@ -43,13 +42,13 @@ class FileIdArgs(BaseModel):
 async def create_twex(
     args: CreateArgs,
     /,
-    socket: AsyncSocket,
-) -> Annotated[dict[str, Any], AckPacker(FileIdArgs, code=201)]:
+    socket: Socket,
+) -> Annotated[FileIdArgs, AckPacker(FileIdArgs, code=201)]:
     twex = Twex(file_name=args.file_name)
     await twex.save()
 
     socket.enter_room(f"{twex.file_id}-publishers")
-    return {"file_id": twex.file_id}
+    return FileIdArgs(file_id=twex.file_id)
 
 
 class SubscribeArgs(BaseModel):
@@ -64,7 +63,7 @@ class SubscribeResp(FileIdArgs, SubscribeArgs, from_attributes=True):
 async def create_twex_subscription(
     args: SubscribeArgs,
     /,
-    socket: AsyncSocket,
+    socket: Socket,
     twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
     event: Annotated[DuplexEmitter, SubscribeResp],
 ) -> Annotated[Twex, AckPacker(SubscribeResp)]:
@@ -96,7 +95,7 @@ async def send_data_to_twex(
     args: SendArgs,
     /,
     event: Annotated[DuplexEmitter, SendResp],
-) -> Annotated[dict[str, Any], AckPacker(SendAck)]:
+) -> Annotated[SendAck, AckPacker(SendAck)]:
     await Twex.transfer_status(
         file_id=args.file_id,
         statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
@@ -108,7 +107,7 @@ async def send_data_to_twex(
         data={"chunk_id": chunk_id, **args.model_dump()},
         target=f"{args.file_id}-subscribers",
     )
-    return {"chunk_id": chunk_id}
+    return SendAck(chunk_id=chunk_id)
 
 
 class ConfirmArgs(FileIdArgs):
