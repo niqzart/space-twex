@@ -3,7 +3,7 @@ from base64 import b64encode
 import pytest
 from faker import Faker
 
-from app.main import sio
+from app.main import tmex
 from app.twex.twex_db import Twex
 from tests.testing import AsyncSIOTestClient
 
@@ -20,7 +20,7 @@ async def roomed_sender(
     sender: AsyncSIOTestClient,
     source_twex: Twex,
 ) -> AsyncSIOTestClient:
-    sio.enter_room(sender.sid, f"{source_twex.file_id}-publishers")
+    tmex.backend.enter_room(sender.sid, f"{source_twex.file_id}-publishers")
     return sender
 
 
@@ -29,7 +29,7 @@ async def roomed_receiver(
     receiver: AsyncSIOTestClient,
     source_twex: Twex,
 ) -> AsyncSIOTestClient:
-    sio.enter_room(receiver.sid, f"{source_twex.file_id}-subscribers")
+    tmex.backend.enter_room(receiver.sid, f"{source_twex.file_id}-subscribers")
     return receiver
 
 

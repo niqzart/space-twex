@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 import pytest
 from faker import Faker
 
-from app.main import sio as sio_server
+from app.main import tmex
 from tests.testing import AsyncSIOTestClient, AsyncSIOTestServer
 
 
@@ -14,7 +14,7 @@ def anyio_backend() -> str:
 
 @pytest.fixture(scope="session")
 async def server() -> AsyncIterator[AsyncSIOTestServer]:
-    with AsyncSIOTestServer(server=sio_server).mock() as server:
+    with AsyncSIOTestServer(server=tmex.backend).mock() as server:
         yield server
 
 
