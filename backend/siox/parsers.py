@@ -20,7 +20,7 @@ from siox.packagers import BasicErrorPackager, NoopPackager, Packager, PydanticP
 from siox.results import (
     ClientHandler,
     Dependency,
-    ExpandableArgument,
+    ExpandedArgument,
     MarkerDestinations,
     Runnable,
 )
@@ -30,9 +30,42 @@ from siox.types import AnyCallable, LocalNS
 T = TypeVar("T")
 
 
+class ExpandablePydanticModel:
+    def __init__(self, base: type[BaseModel]) -> None:
+        self.base = base
+        self.fields: dict[str, tuple[type, Any]] = {}
+        self.destinations: dict[str, list[Runnable]] = {}
+
+    def add_field(
+        self, name: str, type_: Any, default: Any, destination: Runnable
+    ) -> None:
+        if default is Parameter.empty:
+            default = ...
+        passed_field = type_, default
+        existing_field = self.fields.get(name)
+        if existing_field is None:
+            self.fields[name] = passed_field
+        elif existing_field != passed_field:
+            raise NotImplementedError("Duplicate with a different type")  # TODO errors
+        self.destinations.setdefault(name, []).append(destination)
+
+    def convert(self) -> type[BaseModel]:
+        return create_model(  # type: ignore[call-overload, no-any-return]
+            f"{self.base.__qualname__}.Expanded",
+            __base__=self.base,
+            **self.fields,
+        )
+
+    def extract(self) -> ExpandedArgument:
+        return ExpandedArgument(
+            base=self.base,
+            destinations=self.destinations,
+        )
+
+
 class SPContext(BaseModel, arbitrary_types_allowed=True):
-    arg_types: list[type | ExpandableArgument] = []
-    first_expandable_argument: ExpandableArgument | None = None
+    arg_types: list[type | ExpandablePydanticModel] = []
+    first_expandable_argument: ExpandablePydanticModel | None = None
     signatures: dict[AnyCallable, SignatureParser] = {}
 
 
@@ -104,7 +137,7 @@ class SignatureParser:
                     f"only {len(self.context.arg_types)} are present"
                 )
             argument_type = self.context.arg_types[decoded]
-            if isinstance(argument_type, ExpandableArgument):
+            if isinstance(argument_type, ExpandablePydanticModel):
                 argument_type.add_field(param.name, type_, param.default, self.runnable)
             else:
                 raise Exception(
@@ -187,7 +220,7 @@ class RequestSignatureParser(SignatureParser):
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         if issubclass(ann, BaseModel):
-            expandable_argument = ExpandableArgument(ann)
+            expandable_argument = ExpandablePydanticModel(ann)
             if self.context.first_expandable_argument is None:
                 self.context.first_expandable_argument = expandable_argument
             self.context.arg_types.append(expandable_argument)
@@ -196,7 +229,7 @@ class RequestSignatureParser(SignatureParser):
 
     def generate_positional_fields(self) -> Iterator[type]:
         for arg_type in self.context.arg_types:
-            if isinstance(arg_type, ExpandableArgument):
+            if isinstance(arg_type, ExpandablePydanticModel):
                 yield arg_type.convert()
             else:  # TODO remove the isinstance check
                 yield arg_type
@@ -241,7 +274,12 @@ class RequestSignatureParser(SignatureParser):
                     for i, ann in enumerate(self.generate_positional_fields())
                 },
             ),
-            arg_types=self.context.arg_types,
+            arg_types=[
+                argument_type.extract()
+                if isinstance(argument_type, ExpandablePydanticModel)
+                else argument_type
+                for argument_type in self.context.arg_types
+            ],
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
             runnable=self.runnable,
