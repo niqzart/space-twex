@@ -14,9 +14,9 @@ class AckPacker(PydanticPackager):
         self.code = code
 
     def pack_to_any(self, data: Any) -> Any:
-        return {**self.model.model_validate(data).model_dump(), "code": self.code}
+        return self.code, super().pack_to_any(data)
 
 
 class NoContentPacker(Packager):
     def pack(self, data: Any) -> DataOrTuple:
-        return {"code": 204}
+        return 204, None
