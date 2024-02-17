@@ -37,10 +37,6 @@ class ErrorPackager(Packager):
         raise NotImplementedError
 
 
-class DictErrorPackager(ErrorPackager):
+class BasicErrorPackager(ErrorPackager):
     def pack_error(self, exception: EventException) -> DataOrTuple:
-        return {
-            "code": exception.code,
-            "reason": exception.reason,
-            "detail": exception.detail,
-        }
+        return exception.code, {"reason": exception.reason, "detail": exception.detail}

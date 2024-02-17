@@ -16,7 +16,7 @@ from siox.markers import (
     Marker,
     ServerEmitterMarker,
 )
-from siox.packagers import DictErrorPackager, NoopPackager, Packager, PydanticPackager
+from siox.packagers import BasicErrorPackager, NoopPackager, Packager, PydanticPackager
 from siox.results import (
     ClientHandler,
     Dependency,
@@ -250,5 +250,5 @@ class RequestSignature(SignatureParser):
             dependency_order=list(self.resolve_dependencies()),
             destination=self.destination,
             result_packager=self.result_packager or NoopPackager(),
-            error_packager=DictErrorPackager(),
+            error_packager=BasicErrorPackager(),
         )
