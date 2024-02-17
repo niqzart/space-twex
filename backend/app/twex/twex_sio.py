@@ -12,7 +12,7 @@ from app.common.sockets import AckPacker, NoContentPacker
 from app.twex.twex_db import Twex, TwexStatus
 from siox.emitters import DuplexEmitter
 from siox.markers import Depends, Sid
-from siox.parsers import RequestSignature
+from siox.parsers import RequestSignatureParser
 from siox.request import RequestData
 from siox.socket import AsyncSocket
 from siox.types import DataOrTuple
@@ -32,7 +32,7 @@ class MainNamespace(AsyncNamespace):  # type: ignore
         if handler is None:
             return None
 
-        request = RequestSignature(handler, ns=type(self))
+        request = RequestSignatureParser(handler, ns=type(self))
         client_event = request.extract()
         result = await client_event.handle(RequestData(self, event, *args))
         if isinstance(result, BaseModel):

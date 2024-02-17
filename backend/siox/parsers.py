@@ -43,12 +43,12 @@ class SignatureParser:
         context: SPContext,
         marker_destinations: MarkerDestinations,
         local_ns: LocalNS | None = None,
-        destination: Runnable | None = None,
+        runnable: Runnable | None = None,
     ) -> None:
         self.func = func
         self.signature: Signature = signature(func)
         self.local_ns: LocalNS = local_ns or {}
-        self.destination: Runnable = destination or Runnable(func)
+        self.runnable: Runnable = runnable or Runnable(func)
         self.context: SPContext = context
         self.marker_destinations = marker_destinations
         self.unresolved: set[AnyCallable] = set()
@@ -59,46 +59,44 @@ class SignatureParser:
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
         if issubclass(type_, AsyncSocket):
             self.marker_destinations.add_destination(
-                AsyncSocketMarker(), self.destination, param.name
+                AsyncSocketMarker(), self.runnable, param.name
             )
         elif issubclass(type_, AsyncServer):
             self.marker_destinations.add_destination(
-                AsyncServerMarker(), self.destination, param.name
+                AsyncServerMarker(), self.runnable, param.name
             )
         elif self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
         else:
             self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default, self.destination
+                param.name, type_, param.default, self.runnable
             )
 
     def parse_double_annotated_kwarg(
         self, param: Parameter, type_: Any, decoded: Any
     ) -> None:
         if isinstance(decoded, Depends):
-            dependency = self.context.signatures.get(decoded.dependency)
-            if dependency is None:
-                dependency = DependencySignature(
+            dependency_signature = self.context.signatures.get(decoded.dependency)
+            if dependency_signature is None:
+                dependency_signature = DependencySignatureParser(
                     decoded.dependency,
                     self.context,
                     self.marker_destinations,
                     self.local_ns,
                 )
-                dependency.parse()
-                self.context.signatures[decoded.dependency] = dependency
-            elif not isinstance(dependency, DependencySignature):
+                dependency_signature.parse()
+                self.context.signatures[decoded.dependency] = dependency_signature
+            elif not isinstance(dependency_signature, DependencySignatureParser):
                 raise Exception(
-                    f"Can't add destination to {type(dependency)}"
+                    f"Can't add destination to {type(dependency_signature)}"
                 )  # TODO errors
-            dependency.the_dep.destinations.setdefault(self.destination, []).append(
-                param.name
-            )
+            dependency_signature.dependency.destinations.setdefault(
+                self.runnable, []
+            ).append(param.name)
             self.unresolved.add(decoded.dependency)
         elif isinstance(decoded, Marker):
-            self.marker_destinations.add_destination(
-                decoded, self.destination, param.name
-            )
+            self.marker_destinations.add_destination(decoded, self.runnable, param.name)
         elif isinstance(decoded, int):
             if len(self.context.arg_types) <= decoded:
                 raise Exception(
@@ -107,9 +105,7 @@ class SignatureParser:
                 )
             argument_type = self.context.arg_types[decoded]
             if isinstance(argument_type, ExpandableArgument):
-                argument_type.add_field(
-                    param.name, type_, param.default, self.destination
-                )
+                argument_type.add_field(param.name, type_, param.default, self.runnable)
             else:
                 raise Exception(
                     f"Param {param} can't be saved to "
@@ -147,7 +143,7 @@ class SignatureParser:
 
     def parse(self) -> None:
         for param in self.signature.parameters.values():
-            annotation: Any = param.annotation  # TODO type the annotation
+            annotation: Any = param.annotation
             if isinstance(annotation, str):
                 global_ns = getattr(self.func, "__globals__", {})
                 annotation = eval_type_lenient(annotation, global_ns, self.local_ns)
@@ -162,7 +158,7 @@ class SignatureParser:
                 raise NotImplementedError  # TODO errors
 
 
-class DependencySignature(SignatureParser):
+class DependencySignatureParser(SignatureParser):
     def __init__(
         self,
         func: AnyCallable,
@@ -170,16 +166,16 @@ class DependencySignature(SignatureParser):
         marker_destinations: MarkerDestinations,
         local_ns: dict[str, Any],
     ) -> None:
-        self.the_dep: Dependency = Dependency(func)  # TODO naming
+        self.dependency: Dependency = Dependency(func)
         super().__init__(
-            func, context, marker_destinations, local_ns, destination=self.the_dep
+            func, context, marker_destinations, local_ns, runnable=self.dependency
         )
 
     def parse_positional_only(self, param: Parameter, ann: Any) -> None:
         raise Exception("No positional args allowed for dependencies")  # TODO errors
 
 
-class RequestSignature(SignatureParser):
+class RequestSignatureParser(SignatureParser):
     def __init__(self, handler: Callable[..., Any], ns: type | None = None):
         super().__init__(
             func=handler,
@@ -214,9 +210,9 @@ class RequestSignature(SignatureParser):
                 if len(dependency.unresolved) == 0
             ]
             yield from (
-                dependency.the_dep
+                dependency.dependency
                 for dependency in layer
-                if isinstance(dependency, DependencySignature)
+                if isinstance(dependency, DependencySignatureParser)
             )
             for signature in self.context.signatures.values():
                 for resolved in layer:
@@ -248,7 +244,7 @@ class RequestSignature(SignatureParser):
             arg_types=self.context.arg_types,
             arg_count=len(self.context.arg_types),
             dependency_order=list(self.resolve_dependencies()),
-            destination=self.destination,
+            runnable=self.runnable,
             result_packager=self.result_packager or NoopPackager(),
             error_packager=BasicErrorPackager(),
         )

@@ -112,7 +112,7 @@ class ClientHandler:
         arg_types: list[type | ExpandableArgument],
         arg_count: int,
         dependency_order: list[Dependency],
-        destination: Runnable,
+        runnable: Runnable,
         result_packager: Packager,
         error_packager: ErrorPackager,
     ):
@@ -121,7 +121,7 @@ class ClientHandler:
         self.arg_types = arg_types
         self.arg_count = arg_count
         self.dependency_order = dependency_order
-        self.destination = destination
+        self.runnable = runnable
         self.result_packager = result_packager
         self.error_packager = error_packager
 
@@ -151,7 +151,7 @@ class ClientHandler:
             )
 
         try:
-            self.destination.args = tuple(self.parse_arguments(request.arguments))
+            self.runnable.args = tuple(self.parse_arguments(request.arguments))
         except (ValidationError, AttributeError) as e:
             return self.error_packager.pack_error(EventException(422, str(e)))
 
@@ -166,7 +166,7 @@ class ClientHandler:
                             destination.kwargs[field_name] = value
 
                 # call the function
-                return self.result_packager.pack(await self.destination.run())
+                return self.result_packager.pack(await self.runnable.run())
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
