@@ -2,53 +2,37 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager, contextmanager
-from inspect import (
-    Parameter,
-    isasyncgenfunction,
-    iscoroutinefunction,
-    isgeneratorfunction,
-)
+from inspect import isasyncgenfunction, iscoroutinefunction, isgeneratorfunction
 from typing import Any, TypeVar
 
-from pydantic import BaseModel, ValidationError, create_model
+from pydantic import BaseModel, ValidationError
 
-from app.common.sockets import AbortException, Ack
+from siox.exceptions import EventException
 from siox.markers import Marker
+from siox.packagers import ErrorPackager, Packager
 from siox.request import RequestData
+from siox.types import DataOrTuple
 
 T = TypeVar("T")
 
 
-class ExpandableArgument:  # TODO split into this & argument parser
-    def __init__(self, base: type[BaseModel]) -> None:
-        self.base = base
-        self.fields: dict[str, tuple[type, Any]] = {}
-        self.destinations: dict[str, list[Runnable]] = {}
-
-    def add_field(
-        self, name: str, type_: Any, default: Any, destination: Runnable
+class ExpandedArgument:
+    def __init__(
+        self, base: type[BaseModel], destinations: dict[str, list[Runnable]]
     ) -> None:
-        if default is Parameter.empty:
-            default = ...
-        passed_field = type_, default
-        existing_field = self.fields.get(name)
-        if existing_field is None:
-            self.fields[name] = passed_field
-        elif existing_field != passed_field:
-            raise NotImplementedError("Duplicate with a different type")  # TODO errors
-        self.destinations.setdefault(name, []).append(destination)
-
-    def convert(self) -> type[BaseModel]:
-        return create_model(  # type: ignore[call-overload, no-any-return]
-            f"{self.base.__qualname__}.Expanded",
-            __base__=self.base,
-            **self.fields,
-        )
+        self.base = base
+        self.destinations = destinations
 
     def clean(self, result: BaseModel) -> BaseModel:
         return self.base.model_validate(
             result.model_dump(include=set(self.base.model_fields.keys()))
         )
+
+    def fulfill_destinations(self, result: BaseModel) -> None:
+        for field_name, destinations in self.destinations.items():
+            value = getattr(result, field_name)
+            for destination in destinations:
+                destination.kwargs[field_name] = value
 
 
 class Runnable:
@@ -102,22 +86,26 @@ class MarkerDestinations:
                 destination.kwargs[field_name] = value
 
 
-class ClientEvent:
+class ClientHandler:
     def __init__(
         self,
         marker_destinations: MarkerDestinations,
         arg_model: type[BaseModel],
-        arg_types: list[type | ExpandableArgument],
+        arg_types: list[type | ExpandedArgument],
         arg_count: int,
         dependency_order: list[Dependency],
-        destination: Runnable,
+        runnable: Runnable,
+        result_packager: Packager,
+        error_packager: ErrorPackager,
     ):
         self.marker_destinations = marker_destinations
         self.arg_model = arg_model
         self.arg_types = arg_types
         self.arg_count = arg_count
         self.dependency_order = dependency_order
-        self.destination = destination
+        self.runnable = runnable
+        self.result_packager = result_packager
+        self.error_packager = error_packager
 
     def parse_arguments(self, arguments: tuple[Any, ...]) -> Iterator[Any]:
         converted = self.arg_model.model_validate(
@@ -125,26 +113,27 @@ class ClientEvent:
         )
         for i, arg_type in enumerate(self.arg_types):
             result: Any = getattr(converted, str(i))
-            if isinstance(arg_type, ExpandableArgument):
+            # TODO remove instance check & properly support non-pydantic arguments
+            if isinstance(arg_type, ExpandedArgument):
                 yield arg_type.clean(result)
-                for field_name, destinations in arg_type.destinations.items():
-                    value = getattr(result, field_name)
-                    for destination in destinations:
-                        destination.kwargs[field_name] = value
+                arg_type.fulfill_destinations(result)
             else:
                 yield result
 
-    async def execute(self, request: RequestData) -> Ack | None:
+    async def handle(self, request: RequestData) -> DataOrTuple:
         if len(request.arguments) != self.arg_count:
-            return Ack(
-                code=422,
-                data=f"Required {self.arg_count}, but {len(request.arguments)} given",
+            return self.error_packager.pack_error(
+                EventException(
+                    422,
+                    f"Event requires exactly {self.arg_count} arguments, "
+                    f"but {len(request.arguments)} arguments were received",
+                )
             )
 
         try:
-            self.destination.args = tuple(self.parse_arguments(request.arguments))
+            self.runnable.args = tuple(self.parse_arguments(request.arguments))
         except (ValidationError, AttributeError) as e:
-            return Ack(code=422, data=str(e))
+            return self.error_packager.pack_error(EventException(422, str(e)))
 
         self.marker_destinations.fill_all(request)
 
@@ -157,9 +146,9 @@ class ClientEvent:
                             destination.kwargs[field_name] = value
 
                 # call the function
-                return await self.destination.run()
+                return self.result_packager.pack(await self.runnable.run())
             # this code is, in fact, reachable
             # noinspection PyUnreachableCode
             return None  # TODO `with` above can lead to no return
-        except AbortException as e:
-            return e.ack
+        except EventException as e:
+            return self.error_packager.pack_error(e)

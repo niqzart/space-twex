@@ -12,17 +12,16 @@ async def test_successful_send(
     roomed_sender: AsyncSIOTestClient,
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
-    chunk: bytes,
+    chunk: str,
     stating_status: TwexStatus,
 ) -> None:
     await source_twex.update_status(stating_status)
 
-    ack_send = await roomed_sender.emit(
+    code_send, ack_send = await roomed_sender.emit(
         "send", {"file_id": source_twex.file_id, "chunk": chunk}
     )
-    assert ack_send.get("code") == 200
-    assert isinstance(ack_send_data := ack_send.get("data", None), dict)
-    assert (chunk_id := ack_send_data.get("chunk_id")) is not None
+    assert code_send == 200
+    assert (chunk_id := ack_send.get("chunk_id")) is not None
 
     event_send = roomed_receiver.event_pop("send")
     assert isinstance(event_send, dict)
@@ -56,8 +55,8 @@ async def test_bad_data_send(
     data: dict[str, Any],
     code: int,
 ) -> None:
-    ack_subscribe = await roomed_sender.emit("send", data)
-    assert ack_subscribe.get("code") == code
+    code_subscribe, ack_subscribe = await roomed_sender.emit("send", data)
+    assert code_subscribe == code
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex
@@ -79,16 +78,16 @@ async def test_wrong_status_send(
     roomed_sender: AsyncSIOTestClient,
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
-    chunk: bytes,
+    chunk: str,
     status: TwexStatus,
 ) -> None:
     await source_twex.update_status(status)
 
-    ack_send = await roomed_sender.emit(
+    code_send, ack_send = await roomed_sender.emit(
         "send", {"file_id": source_twex.file_id, "chunk": chunk}
     )
-    assert ack_send.get("code") == 400
-    assert ack_send.get("data") == f"Wrong status: {status.value}"
+    assert code_send == 400
+    assert ack_send.get("reason") == f"Wrong status: {status.value}"
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex

@@ -12,10 +12,11 @@ async def test_successful_subscribe(
     receiver: AsyncSIOTestClient,
     source_twex: Twex,
 ) -> None:
-    ack_subscribe = await receiver.emit("subscribe", {"file_id": source_twex.file_id})
-    assert ack_subscribe.get("code") == 200
-    assert isinstance(ack_subscribe_data := ack_subscribe.get("data", None), dict)
-    assert ack_subscribe_data.get("file_name") == source_twex.file_name
+    code_subscribe, ack_subscribe = await receiver.emit(
+        "subscribe", {"file_id": source_twex.file_id}
+    )
+    assert code_subscribe == 200
+    assert ack_subscribe.get("file_name") == source_twex.file_name
 
     event_subscribe = roomed_sender.event_pop("subscribe")
     assert isinstance(event_subscribe, dict)
@@ -45,8 +46,8 @@ async def test_bad_data_subscribe(
     data: dict[str, Any],
     code: int,
 ) -> None:
-    ack_subscribe = await receiver.emit("subscribe", data)
-    assert ack_subscribe.get("code") == code
+    code_subscribe, _ = await receiver.emit("subscribe", data)
+    assert code_subscribe == code
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex
@@ -73,9 +74,11 @@ async def test_wrong_status_subscribe(
 ) -> None:
     await source_twex.update_status(status)
 
-    ack_subscribe = await receiver.emit("subscribe", {"file_id": source_twex.file_id})
-    assert ack_subscribe.get("code") == 400
-    assert ack_subscribe.get("data") == f"Wrong status: {status.value}"
+    code_subscribe, ack_subscribe = await receiver.emit(
+        "subscribe", {"file_id": source_twex.file_id}
+    )
+    assert code_subscribe == 400
+    assert ack_subscribe.get("reason") == f"Wrong status: {status.value}"
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex

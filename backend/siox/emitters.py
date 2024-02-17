@@ -1,9 +1,8 @@
-from typing import Any, ClassVar, cast
+from typing import Any, ClassVar
 
-from pydantic import BaseModel
-
+from siox.packagers import Packager
 from siox.socket import AsyncSocket
-from siox.types import CallbackProtocol, DataType
+from siox.types import CallbackProtocol
 
 
 class ServerEmitter:
@@ -12,15 +11,12 @@ class ServerEmitter:
     def __init__(
         self,
         socket: AsyncSocket,
-        model: type[BaseModel],
+        packager: Packager,
         name: str,
     ) -> None:
         self.socket = socket
-        self.model = model
+        self.packager = packager
         self.name = name
-
-    def _convert_data(self, data: Any) -> DataType | tuple[DataType, ...]:
-        return cast(DataType, self.model.model_validate(data).model_dump())
 
     async def emit(
         self,
@@ -36,7 +32,7 @@ class ServerEmitter:
             exclude_self = self.default_exclude_self
         await self.socket.emit(
             event=self.name,
-            data=self._convert_data(data),
+            data=self.packager.pack(data),
             target=target,
             skip_sid=skip_sid,
             exclude_self=exclude_self,

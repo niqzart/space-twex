@@ -2,8 +2,8 @@ from typing import Any
 
 import pytest
 
-from app.common.sockets import AbortException
 from app.twex.twex_db import Twex, TwexStatus
+from siox.exceptions import EventException
 from tests.testing import AsyncSIOTestClient
 
 
@@ -12,18 +12,21 @@ async def test_successful_finish(
     roomed_sender: AsyncSIOTestClient,
     roomed_receiver: AsyncSIOTestClient,
     source_twex: Twex,
-    chunk: bytes,
+    chunk: str,
 ) -> None:
     await source_twex.update_status(TwexStatus.CONFIRMED)
 
-    ack_finish = await roomed_sender.emit("finish", {"file_id": source_twex.file_id})
-    assert ack_finish.get("code") == 200
+    code_finish, ack_finish = await roomed_sender.emit(
+        "finish", {"file_id": source_twex.file_id}
+    )
+    assert code_finish == 204
+    assert ack_finish is None
 
     event_finish = roomed_receiver.event_pop("finish")
     assert isinstance(event_finish, dict)
     assert event_finish.get("file_id") == source_twex.file_id
 
-    with pytest.raises(AbortException):
+    with pytest.raises(EventException):
         await Twex.find_one(source_twex.file_id)
 
     assert roomed_sender.event_count() == 0
@@ -45,8 +48,8 @@ async def test_bad_data_finish(
     data: dict[str, Any],
     code: int,
 ) -> None:
-    ack_subscribe = await roomed_sender.emit("finish", data)
-    assert ack_subscribe.get("code") == code
+    code_subscribe, _ = await roomed_sender.emit("finish", data)
+    assert code_subscribe == code
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex
@@ -73,9 +76,11 @@ async def test_wrong_status_finish(
 ) -> None:
     await source_twex.update_status(status)
 
-    ack_send = await roomed_sender.emit("finish", {"file_id": source_twex.file_id})
-    assert ack_send.get("code") == 400
-    assert ack_send.get("data") == f"Wrong status: {status.value}"
+    code_send, ack_send = await roomed_sender.emit(
+        "finish", {"file_id": source_twex.file_id}
+    )
+    assert code_send == 400
+    assert ack_send.get("reason") == f"Wrong status: {status.value}"
 
     result_twex = await Twex.find_one(source_twex.file_id)
     assert result_twex == source_twex
