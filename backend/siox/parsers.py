@@ -8,14 +8,7 @@ from pydantic import BaseModel, create_model
 from pydantic._internal._typing_extra import eval_type_lenient
 
 from siox.emitters import DuplexEmitter, ServerEmitter
-from siox.markers import (
-    AsyncServerMarker,
-    AsyncSocketMarker,
-    Depends,
-    DuplexEmitterMarker,
-    Marker,
-    ServerEmitterMarker,
-)
+from siox.markers import Depends, DuplexEmitterMarker, Marker, ServerEmitterMarker
 from siox.packagers import BasicErrorPackager, NoopPackager, Packager, PydanticPackager
 from siox.results import (
     ClientHandler,
@@ -24,7 +17,6 @@ from siox.results import (
     MarkerDestinations,
     Runnable,
 )
-from siox.socket import AsyncServer, AsyncSocket
 from siox.types import AnyCallable, LocalNS
 
 T = TypeVar("T")
@@ -90,21 +82,13 @@ class SignatureParser:
         raise NotImplementedError
 
     def parse_typed_kwarg(self, param: Parameter, type_: type) -> None:
-        if issubclass(type_, AsyncSocket):
-            self.marker_destinations.add_destination(
-                AsyncSocketMarker(), self.runnable, param.name
-            )
-        elif issubclass(type_, AsyncServer):
-            self.marker_destinations.add_destination(
-                AsyncServerMarker(), self.runnable, param.name
-            )
-        elif self.context.first_expandable_argument is None:
+        if self.context.first_expandable_argument is None:
             # TODO better error message or auto-creation of first expandable
             raise Exception("No expandable arguments found")
-        else:
-            self.context.first_expandable_argument.add_field(
-                param.name, type_, param.default, self.runnable
-            )
+
+        self.context.first_expandable_argument.add_field(
+            param.name, type_, param.default, self.runnable
+        )
 
     def parse_double_annotated_kwarg(
         self, param: Parameter, type_: Any, decoded: Any

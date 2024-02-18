@@ -11,7 +11,7 @@ from siox.exceptions import EventException
 from siox.markers import Marker
 from siox.packagers import ErrorPackager, Packager
 from siox.request import RequestData
-from siox.types import DataOrTuple
+from siox.types import DataOrTuple, DataType, HandlerProtocol, SocketIOBackend
 
 T = TypeVar("T")
 
@@ -152,3 +152,13 @@ class ClientHandler:
             return None  # TODO `with` above can lead to no return
         except EventException as e:
             return self.error_packager.pack_error(e)
+
+    def build_handler(
+        self,
+        backend: SocketIOBackend,
+        event_name: str,
+    ) -> HandlerProtocol:
+        async def build_handler_inner(sid: str, *args: DataType) -> DataOrTuple:
+            return await self.handle(RequestData(backend, event_name, sid, *args))
+
+        return build_handler_inner

@@ -65,3 +65,5 @@ class AsyncSocketMarker(Marker[AsyncSocket]):
 Sid = Annotated[str, SessionIDMarker()]
 EventName = Annotated[str, EventNameMarker()]
 Request = Annotated[RequestData, RequestMarker()]
+Server = Annotated[AsyncServer, AsyncServerMarker()]
+Socket = Annotated[AsyncSocket, AsyncSocketMarker()]

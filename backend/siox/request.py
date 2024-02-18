@@ -1,12 +1,13 @@
 from typing import Any
 
-from siox.socket import AsyncServer, AsyncSocket
+from siox.socket import AsyncSocket
+from siox.types import SocketIOBackend
 
 
 class RequestData:
     def __init__(
         self,
-        server: AsyncServer,
+        server: SocketIOBackend,
         event_name: str,
         sid: str,
         *arguments: Any,

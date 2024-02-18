@@ -1,7 +1,9 @@
-from socketio import ASGIApp, AsyncNamespace, AsyncServer  # type: ignore
+from socketio import ASGIApp  # type: ignore
 
-from app.twex.twex_sio import MainNamespace
+from app.twex import twex_sio
+from siox.routing import TMEXIO
 
-sio = AsyncServer(async_mode="asgi")
-sio.register_namespace(MainNamespace("/"))
-app = ASGIApp(socketio_server=sio)
+tmex = TMEXIO(async_mode="asgi")
+tmex.include_router(twex_sio.router)
+
+app = ASGIApp(socketio_server=tmex.backend)

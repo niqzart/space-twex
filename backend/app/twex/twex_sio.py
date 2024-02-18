@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated
 from uuid import uuid4
 
 from pydantic import BaseModel
@@ -11,11 +11,8 @@ from socketio import AsyncNamespace  # type: ignore
 from app.common.sockets import AckPacker, NoContentPacker
 from app.twex.twex_db import Twex, TwexStatus
 from siox.emitters import DuplexEmitter
-from siox.markers import Depends, Sid
-from siox.parsers import RequestSignatureParser
-from siox.request import RequestData
-from siox.socket import AsyncSocket
-from siox.types import DataOrTuple
+from siox.markers import Depends, Sid, Socket
+from siox.routing import EventRouter
 
 
 def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]]:
@@ -25,121 +22,125 @@ def twex_with_status(statuses: set[TwexStatus]) -> Callable[..., Awaitable[Twex]
     return twex_with_status_inner
 
 
-class MainNamespace(AsyncNamespace):  # type: ignore
-    async def trigger_event(self, event: str, *args: Any) -> DataOrTuple:
-        handler_name = f"on_{event}"
-        handler = getattr(self, handler_name, None)
-        if handler is None:
-            return None
+router = EventRouter()
 
-        request = RequestSignatureParser(handler, ns=type(self))
-        client_event = request.extract()
-        result = await client_event.handle(RequestData(self, event, *args))
-        if isinstance(result, BaseModel):
-            return result.model_dump()
-        return result
 
-    async def on_connect(self, sid: Sid) -> None:
-        logging.warning(f"Connected to {sid}")
+@router.on("connect")
+async def accept_connection(sid: Sid) -> None:
+    logging.warning(f"Connected to {sid}")
 
-    class CreateArgs(BaseModel):
-        file_name: str
 
-    class FileIdArgs(BaseModel):
-        file_id: str
+class CreateArgs(BaseModel):
+    file_name: str
 
-    async def on_create(
-        self,
-        args: CreateArgs,
-        /,
-        socket: AsyncSocket,
-    ) -> Annotated[dict[str, Any], AckPacker(FileIdArgs, code=201)]:
-        twex = Twex(file_name=args.file_name)
-        await twex.save()
 
-        socket.enter_room(f"{twex.file_id}-publishers")
-        return {"file_id": twex.file_id}
+class FileIdArgs(BaseModel):
+    file_id: str
 
-    class SubscribeArgs(BaseModel):
+
+@router.on("create")
+async def create_twex(
+    args: CreateArgs,
+    /,
+    socket: Socket,
+) -> Annotated[FileIdArgs, AckPacker(FileIdArgs, code=201)]:
+    twex = Twex(file_name=args.file_name)
+    await twex.save()
+
+    socket.enter_room(f"{twex.file_id}-publishers")
+    return FileIdArgs(file_id=twex.file_id)
+
+
+class SubscribeArgs(BaseModel):
+    pass
+
+
+class SubscribeResp(FileIdArgs, SubscribeArgs, from_attributes=True):
+    file_name: str
+
+
+@router.on("subscribe")
+async def create_twex_subscription(
+    args: SubscribeArgs,
+    /,
+    socket: Socket,
+    twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
+    event: Annotated[DuplexEmitter, SubscribeResp],
+) -> Annotated[Twex, AckPacker(SubscribeResp)]:
+    if args:
         pass
 
-    class SubscribeResp(FileIdArgs, SubscribeArgs, from_attributes=True):
-        file_name: str
+    await twex.update_status(new_status=TwexStatus.FULL)
+    # TODO more control over FULL for non-dialog twexes
 
-    async def on_subscribe(
-        self,
-        args: SubscribeArgs,
-        /,
-        socket: AsyncSocket,
-        twex: Annotated[Twex, Depends(twex_with_status({TwexStatus.OPEN}))],
-        event: Annotated[DuplexEmitter, SubscribeResp],
-    ) -> Annotated[Twex, AckPacker(SubscribeResp)]:
-        if args:
-            pass
+    socket.enter_room(f"{twex.file_id}-subscribers")
+    await event.emit(data=twex, target=f"{twex.file_id}-publishers")
+    return twex
 
-        await twex.update_status(new_status=TwexStatus.FULL)
-        # TODO more control over FULL for non-dialog twexes
 
-        socket.enter_room(f"{twex.file_id}-subscribers")
-        await event.emit(data=twex, target=f"{twex.file_id}-publishers")
-        return twex
+class SendArgs(FileIdArgs):
+    chunk: str
 
-    class SendArgs(FileIdArgs):
-        chunk: str
 
-    class SendAck(BaseModel):
-        chunk_id: str
+class SendAck(BaseModel):
+    chunk_id: str
 
-    class SendResp(SendArgs, SendAck):
-        pass
 
-    async def on_send(
-        self,
-        args: SendArgs,
-        /,
-        event: Annotated[DuplexEmitter, SendResp],
-    ) -> Annotated[dict[str, Any], AckPacker(SendAck)]:
-        await Twex.transfer_status(
-            file_id=args.file_id,
-            statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
-            new_status=TwexStatus.SENT,
-        )
+class SendResp(SendArgs, SendAck):
+    pass
 
-        chunk_id: str = uuid4().hex
-        await event.emit(
-            data={"chunk_id": chunk_id, **args.model_dump()},
-            target=f"{args.file_id}-subscribers",
-        )
-        return {"chunk_id": chunk_id}
 
-    class ConfirmArgs(FileIdArgs):
-        chunk_id: str
+@router.on("send")
+async def send_data_to_twex(
+    args: SendArgs,
+    /,
+    event: Annotated[DuplexEmitter, SendResp],
+) -> Annotated[SendAck, AckPacker(SendAck)]:
+    await Twex.transfer_status(
+        file_id=args.file_id,
+        statuses={TwexStatus.FULL, TwexStatus.CONFIRMED},
+        new_status=TwexStatus.SENT,
+    )
 
-    async def on_confirm(
-        self,
-        args: ConfirmArgs,
-        /,
-        event: Annotated[DuplexEmitter, ConfirmArgs],
-    ) -> Annotated[None, NoContentPacker()]:
-        await Twex.transfer_status(
-            file_id=args.file_id,
-            statuses={TwexStatus.SENT},
-            new_status=TwexStatus.CONFIRMED,
-        )
-        await event.emit(data=args, target=f"{args.file_id}-publishers")
+    chunk_id: str = uuid4().hex
+    await event.emit(
+        data={"chunk_id": chunk_id, **args.model_dump()},
+        target=f"{args.file_id}-subscribers",
+    )
+    return SendAck(chunk_id=chunk_id)
 
-    class FinishArgs(FileIdArgs):
-        pass
 
-    async def on_finish(
-        self,
-        args: FinishArgs,
-        /,
-        event: Annotated[DuplexEmitter, FinishArgs],
-    ) -> Annotated[None, NoContentPacker()]:
-        await Twex.transfer_status(
-            file_id=args.file_id,
-            statuses={TwexStatus.CONFIRMED},
-            new_status=TwexStatus.FINISHED,
-        )
-        await event.emit(data=args, target=f"{args.file_id}-subscribers")
+class ConfirmArgs(FileIdArgs):
+    chunk_id: str
+
+
+@router.on("confirm")
+async def confirm_data_receive_from_twex(
+    args: ConfirmArgs,
+    /,
+    event: Annotated[DuplexEmitter, ConfirmArgs],
+) -> Annotated[None, NoContentPacker()]:
+    await Twex.transfer_status(
+        file_id=args.file_id,
+        statuses={TwexStatus.SENT},
+        new_status=TwexStatus.CONFIRMED,
+    )
+    await event.emit(data=args, target=f"{args.file_id}-publishers")
+
+
+class FinishArgs(FileIdArgs):
+    pass
+
+
+@router.on("finish")
+async def finish_twex_transmission(
+    args: FinishArgs,
+    /,
+    event: Annotated[DuplexEmitter, FinishArgs],
+) -> Annotated[None, NoContentPacker()]:
+    await Twex.transfer_status(
+        file_id=args.file_id,
+        statuses={TwexStatus.CONFIRMED},
+        new_status=TwexStatus.FINISHED,
+    )
+    await event.emit(data=args, target=f"{args.file_id}-subscribers")
